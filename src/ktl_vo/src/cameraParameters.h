@@ -21,6 +21,9 @@ double kImage[9] = { 707.0912, 0, 601.8873,
 					 0, 0, 1
 				   };
 
+
 double dImage[4] = {0, 0, 0, 0};
+
+double bf =  386.1448;
 
 #endif

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <ros/ros.h>
 #include "opencv2/video/tracking.hpp"
+#include <opencv2/ximgproc/disparity_filter.hpp>
 
 #include "cameraParameters.h"
 #include "pointDefinition.h"
@@ -13,6 +14,7 @@ using namespace std;
 using namespace cv;
 
 bool systemInited = false;
+bool systemInitedDepth = false;
 bool isOddFrame = true;
 double timeCur, timeLast;
 
@@ -29,6 +31,9 @@ IplImage *imageHarrisNormScaled = cvCreateImage(imgSize, IPL_DEPTH_8U, 1);
 IplImage *mask;
 
 Mat image0, image1;
+Mat imageLastMat, imageCurMat;
+
+Mat imageLastDepth, imageCurDepth;
 
 Mat mapxMap, mapyMap;
 
@@ -50,7 +55,7 @@ Mat imageShowMat;
 
 IplImage *mapx, *mapy;
 
-const int maxFeatureNumPerSubregion = 16;
+const int maxFeatureNumPerSubregion = 24;
 const int xSubregionNum = 12;
 const int ySubregionNum = 8;
 const int totalSubregionNum = xSubregionNum * ySubregionNum;
@@ -87,16 +92,117 @@ int featuresInd[2 * MAXFEATURENUM] = {0};
 int totalFeatureNum = 0;
 int subregionFeatureNum[2 * totalSubregionNum] = {0};
 
-pcl::PointCloud<ImagePoint>::Ptr imagePointsCur(new pcl::PointCloud<ImagePoint>());
-pcl::PointCloud<ImagePoint>::Ptr imagePointsLast(new pcl::PointCloud<ImagePoint>());
+//pcl::PointCloud<ImagePoint>::Ptr imagePointsCur(new pcl::PointCloud<ImagePoint>());
+//pcl::PointCloud<ImagePoint>::Ptr imagePointsLast(new pcl::PointCloud<ImagePoint>());
 
 ros::Publisher *imagePointsLastPubPointer;
+ros::Publisher *imagePointsCurPubPointer;
 ros::Publisher *imageShowPubPointer;
+ros::Publisher *imageDepthPubPointer;
 cv_bridge::CvImage bridge;
 cv_bridge::CvImagePtr cv_ptr;
+cv_bridge::CvImage depthBridge;
+
+void ComputeDepthMap(const cv::Mat &imLeft, const cv::Mat &imRight, cv::Mat &filtered_disp, cv::Mat &filtered_disp_vis)
+{
+    cv::Mat left_for_matcher, right_for_matcher;
+    cv::Mat left_disp, right_disp;
+    //cv::Mat filtered_disp_in;
+    cv::Mat conf_map = cv::Mat(imLeft.rows, imLeft.cols, CV_8U);
+    conf_map = cv::Scalar(255);
+    cv::Rect ROI;
+    cv::Ptr<cv::ximgproc::DisparityWLSFilter> wls_filter;
+    int wsize = 3;
+    double wls_lambda = 8000.0;
+    double wls_sigma = 1.5;
+
+    left_for_matcher = imLeft.clone();
+    right_for_matcher = imRight.clone();
+
+    cv::Ptr<cv::StereoSGBM> left_matcher = cv::StereoSGBM::create(0, 160, wsize,  0, 0, 0,
+                                                                  0,  0, 0, 0, cv::StereoSGBM::MODE_HH);
+
+    left_matcher->setP1(24*wsize*wsize);
+    left_matcher->setP2(96*wsize*wsize);
+    left_matcher->setPreFilterCap(63);
+    left_matcher->setMode(cv::StereoSGBM::MODE_SGBM_3WAY);
+    wls_filter = cv::ximgproc::createDisparityWLSFilter(left_matcher);
+
+    cv::Ptr<cv::StereoMatcher> right_matcher = cv::ximgproc::createRightMatcher(left_matcher);
+
+    left_matcher->compute(left_for_matcher, right_for_matcher, left_disp);
+    right_matcher->compute(right_for_matcher, left_for_matcher, right_disp);
+
+
+    wls_filter->setLambda(wls_lambda);
+    wls_filter->setSigmaColor(wls_sigma);
+    wls_filter->filter(left_disp, imLeft, filtered_disp, right_disp);
+
+    //std::cout << "Disparity map 1 : " << filtered_disp.size() << std::endl;
+
+    conf_map = wls_filter->getConfidenceMap();
+    ROI = wls_filter->getROI();
+
+
+    //cv::Mat raw_disp_vis, filtered_disp_vis;
+    double vis_mult = 1.0;
+
+    //cv::ximgproc::getDisparityVis(left_disp, raw_disp_vis, vis_mult);
+    //cv::namedWindow("raw disparity", cv::WINDOW_AUTOSIZE);
+    //cv::imshow("raw disparity", raw_disp_vis);
+
+    cv::ximgproc::getDisparityVis(filtered_disp, filtered_disp_vis, vis_mult);
+
+    //cv::imshow("filtered disparity", filtered_disp_vis);
+    //cv::waitKey(1);
+
+}
+
+void imageDepthHandler(const sensor_msgs::Image::ConstPtr& imageData)
+{
+
+	cv_bridge::CvImageConstPtr imageDataCv = cv_bridge::toCvShare(imageData, "mono8");
+
+	if (!systemInitedDepth) {
+    	imageLastDepth = imageDataCv->image;
+    	systemInitedDepth = true;
+
+    return;
+  }
+
+
+   Mat filtered_disp_vis;
+   Mat depth;
+
+   bool answ = imageLastDepth.size() ==  imageLastMat.size();
+
+   
+   //cout << "imageLastDepth.size: " << imageLastDepth.size() << "\n";
+   //cout << "imageLastMat.size: " << imageLastMat.size() << "\n";
+   //cout << "answ: " << answ << "\n";
+
+   if(!imageLastDepth.empty() && !imageLastMat.empty())
+   {
+   		ComputeDepthMap(imageLastMat, imageLastDepth, depth, filtered_disp_vis);
+
+  		imageLastDepth = imageDataCv->image;
+
+   		depthBridge.image = depth;
+    	depthBridge.encoding = sensor_msgs::image_encodings::TYPE_16SC1;
+    	sensor_msgs::Image::Ptr imageDepthPointer = depthBridge.toImageMsg();
+    	imageDepthPubPointer->publish(imageDepthPointer);
+
+   }
+  	
+}
+
 
 void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData) 
 {
+
+  pcl::PointCloud<ImagePoint>::Ptr imagePointsCur(new pcl::PointCloud<ImagePoint>());
+  pcl::PointCloud<ImagePoint>::Ptr imagePointsLast(new pcl::PointCloud<ImagePoint>());
+
   timeLast = timeCur;
   timeCur = imageData->header.stamp.toSec() - 0.1163;
 
@@ -109,7 +215,7 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
     return;
   }
 
-   Mat imageLastMat, imageCurMat;
+   
    if (isOddFrame) {
     remap(imageDataCv->image, image1, mapxMap, mapyMap, CV_INTER_LINEAR);
 
@@ -129,6 +235,8 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
   IplImage *imageTemp = imageLast;
   imageLast = imageCur;
   imageCur = imageTemp;
+
+  //cout << "imageLastMat.depth: " << imageLastMat.depth() << "\n";
 
   //Mat imageTempMat;
   //imageLastMat = imageCurMat;
@@ -165,7 +273,7 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
 
   IplImage *t = cvCloneImage(imageCur);
   cvRemap(t, imageCur, mapx, mapy);
-  //cvEqualizeHist(imageCur, imageCur);
+  cvEqualizeHist(imageCur, imageCur);
   cvReleaseImage(&t);
 
   cvCornerHarris(imageCur, imageHarris, 3);
@@ -193,7 +301,7 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
   cornerHarris(imageLastMat, oclHarrisLast, 2, 3, 0.04);
   normalize( oclHarrisLast, imageHarrisNormMat, 0, 255, NORM_MINMAX, CV_32FC1, Mat() );
   convertScaleAbs( imageHarrisNormMat, imageHarrisNormScaledMat );
-
+/*
   for( int j = 0; j < imageHarrisNormMat.rows ; j++ )
     { 
     	for( int i = 0; i < imageHarrisNormMat.cols; i++ )
@@ -205,9 +313,10 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
         		}
     	}
     }
-   cout << "cornersNum: " << cornersNum << "\n";
-   cv::imshow("Image", cv_ptr->image);
-   cv::waitKey(1);
+    */
+   //cout << "cornersNum: " << cornersNum << "\n";
+   //cv::imshow("Image", cv_ptr->image);
+   //cv::waitKey(1);
 
    //cvShowImage("Image", imageHarrisNormScaled);
    //cvWaitKey(1);
@@ -342,6 +451,7 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
                     + (featuresLastVec[i].y - featuresCurVec[i].y) 
                     * (featuresLastVec[i].y - featuresCurVec[i].y));
 
+
     if (!(trackDis > maxTrackDis || featuresCurVec[i].x < xBoundary || 
       featuresCurVec[i].x > imageWidth - xBoundary || featuresCurVec[i].y < yBoundary || 
       featuresCurVec[i].y > imageHeight - yBoundary)) {
@@ -351,46 +461,57 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
       int ind = xSubregionNum * yInd + xInd;
 
       if (subregionFeatureNum[ind] < maxFeatureNumPerSubregion) {
-        featuresCurVec[featureCount].x = featuresCurVec[i].x;
-        featuresCurVec[featureCount].y = featuresCurVec[i].y;
-        featuresLastVec[featureCount].x = featuresLastVec[i].x;
-        featuresLastVec[featureCount].y = featuresLastVec[i].y;
-        featuresIndVec[featureCount] = featuresIndVec[i];
+        //featuresCurVec[featureCount].x = featuresCurVec[i].x;
+        //featuresCurVec[featureCount].y = featuresCurVec[i].y;
+        //featuresLastVec[featureCount].x = featuresLastVec[i].x;
+        //featuresLastVec[featureCount].y = featuresLastVec[i].y;
+        //featuresIndVec[featureCount] = featuresIndVec[i];
 
         //cout << "featuresCur[featureCount].x :" << featuresCur[featureCount].x << "\n " 
         //					<< "featuresCur[featureCount].y: " << featuresCur[featureCount].y << " \n";
 
-        point.u = -(featuresCur[featureCount].x - kImage[2]) / kImage[0];
-        point.v = -(featuresCur[featureCount].y - kImage[5]) / kImage[4];
+        //point.u = -(featuresCurVec[featureCount].x - kImage[2]) / kImage[0];
+        //point.v = -(featuresCurVec[featureCount].y - kImage[5]) / kImage[4];
+        point.u = featuresCurVec[i].x;
+        point.v = featuresCurVec[i].y;
         point.ind = featuresInd[featureCount];
         imagePointsCur->push_back(point);
 
         //cout << "draw point :" << point.u << " " << point.v <<  " \n";
 
-        cv::circle(cv_ptr->image, cv::Point(point.u, point.v), 10, CV_RGB(255,255,0));
+        //cv::circle(cv_ptr->image, cv::Point(point.u, point.v), 10, CV_RGB(255,255,0));
 
-        if (i >= recordFeatureNum) {
-          point.u = -(featuresLast[featureCount].x - kImage[2]) / kImage[0];
-          point.v = -(featuresLast[featureCount].y - kImage[5]) / kImage[4];
+          //point.u = -(featuresLastVec[featureCount].x - kImage[2]) / kImage[0];
+          //point.v = -(featuresLastVec[featureCount].y - kImage[5]) / kImage[4];
+
+          point.u = featuresLastVec[i].x;
+          point.v = featuresLastVec[i].y;
           imagePointsLast->push_back(point);
-        }
 
         //meanShiftX += fabs((featuresCur[featureCount].x - featuresLast[featureCount].x) / kImage[0]);
         //meanShiftY += fabs((featuresCur[featureCount].y - featuresLast[featureCount].y) / kImage[4]);
 
         featureCount++;
         subregionFeatureNum[ind]++;
+
+        //cout << "featuresCurVec[featureCount]: " << featuresCurVec[featureCount].x << " " << featuresCurVec[featureCount].y << "\n";
+        //cout <<  
+
+        cv::arrowedLine(cv_ptr->image, featuresLastVec[featureCount], featuresCurVec[featureCount],
+        				 Scalar(0), 2, CV_AA);
       }
     }
   }
+             cv::imshow("OpticalFlow", cv_ptr->image);
+   			cv::waitKey(1);
 
-   //cout << "imagePointsLast.size: " << imagePointsLast->size() << "\n";
-  //cout <<  "imagePointsCur.size: " << imagePointsCur->size() << "\n";
+   cout << "imagePointsLast.size: " << imagePointsLast->size() << "\n";
+   cout <<  "imagePointsCur.size: " << imagePointsCur->size() << "\n";
 
   totalFeatureNum = featureCount;
-  featuresCurVec.resize(totalFeatureNum);
-  featuresLastVec.resize(totalFeatureNum);
-  featuresIndVec.resize(totalFeatureNum);
+  featuresCurVec.clear();
+  featuresLastVec.clear();
+  featuresIndVec.clear();
   //meanShiftX /= totalFeatureNum;
   //meanShiftY /= totalFeatureNum;
 
@@ -398,6 +519,12 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
   pcl::toROSMsg(*imagePointsLast, imagePointsLast2);
   imagePointsLast2.header.stamp = ros::Time().fromSec(timeLast);
   imagePointsLastPubPointer->publish(imagePointsLast2);
+
+  sensor_msgs::PointCloud2 imagePointsCur2;
+  pcl::toROSMsg(*imagePointsCur, imagePointsCur2);
+  imagePointsCur2.header.stamp = ros::Time().fromSec(timeCur);
+  imagePointsCurPubPointer->publish(imagePointsCur2);
+
 
   showCount = (showCount + 1) % (showSkipNum + 1);
   
@@ -443,14 +570,25 @@ int main(int argc, char** argv)
   pyrLast = cvCreateImage(pyrSize, IPL_DEPTH_32F, 1);
   //cv::namedWindow("Image");
   cvNamedWindow( "Image", CV_WINDOW_AUTOSIZE );
+  cvNamedWindow( "OpticalFlow", CV_WINDOW_AUTOSIZE );
+  cv::namedWindow("filtered disparity", cv::WINDOW_AUTOSIZE);
 
   ros::Subscriber imageDataSub = nh.subscribe<sensor_msgs::Image>("/kitti/camera_gray_left/image_raw", 1, imageDataHandler);
+  ros::Subscriber imageDepthSub = nh.subscribe<sensor_msgs::Image>("/kitti/camera_gray_right/image_raw", 1, imageDepthHandler);
+   
+
 
   ros::Publisher imagePointsLastPub = nh.advertise<sensor_msgs::PointCloud2> ("/image_points_last", 5);
   imagePointsLastPubPointer = &imagePointsLastPub;
 
+  ros::Publisher imagePointsCurPub = nh.advertise<sensor_msgs::PointCloud2> ("/image_points_cur", 5);
+  imagePointsCurPubPointer = &imagePointsCurPub;
+
   ros::Publisher imageShowPub = nh.advertise<sensor_msgs::Image>("/image/show", 1);
   imageShowPubPointer = &imageShowPub;
+
+  ros::Publisher imageDepthPub = nh.advertise<sensor_msgs::Image>("/image/depth", 1);
+  imageDepthPubPointer = &imageDepthPub;
 
 
   ros::spin();

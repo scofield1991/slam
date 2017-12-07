@@ -196,19 +196,8 @@ cv::Mat UnprojectStereo(cv::Point2f point2f)
 
 void set_T_matrix(cv::Mat &T_matrix, const cv::Mat &R_matrix, const cv::Mat &t_matrix)
 {
-  // Rotation-Translation Matrix Definition
-  T_matrix.at<double>(0,0) = R_matrix.at<double>(0,0);
-  T_matrix.at<double>(0,1) = R_matrix.at<double>(0,1);
-  T_matrix.at<double>(0,2) = R_matrix.at<double>(0,2);
-  T_matrix.at<double>(1,0) = R_matrix.at<double>(1,0);
-  T_matrix.at<double>(1,1) = R_matrix.at<double>(1,1);
-  T_matrix.at<double>(1,2) = R_matrix.at<double>(1,2);
-  T_matrix.at<double>(2,0) = R_matrix.at<double>(2,0);
-  T_matrix.at<double>(2,1) = R_matrix.at<double>(2,1);
-  T_matrix.at<double>(2,2) = R_matrix.at<double>(2,2);
-  T_matrix.at<double>(0,3) = t_matrix.at<double>(0);
-  T_matrix.at<double>(1,3) = t_matrix.at<double>(1);
-  T_matrix.at<double>(2,3) = t_matrix.at<double>(2);
+       R_matrix.copyTo(T_matrix.rowRange(0,3).colRange(0,3));
+       t_matrix.copyTo(T_matrix.rowRange(0,3).col(3));
 }
 
 
@@ -236,8 +225,10 @@ void estimatePoseRANSAC( const std::vector<cv::Point3f> &list_points3d, // list 
   Rodrigues(rvec,_R_matrix);      // converts Rotation Vector to Matrix
   _t_matrix = tvec;       // set translation matrix
 
+  std::cout << "_t_matrix: " << _t_matrix << "\n";
   set_T_matrix(mTcw, _R_matrix, _t_matrix); // set rotation-translation matrix
 
+  std::cout << "mTcw: " << mTcw << "\n";
 }
 
 void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
@@ -274,7 +265,7 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
       estimatePoseRANSAC(mvP3Dw, mvP2D, pnpMethod, inliersIdx,
                       iterationsCount, reprojectionError, confidence, mTcw);
 
-      std::cout << "mTcw: " << mTcw << "\n";
+      //std::cout << "mTcw: " << mTcw << "\n";
   }
 
 

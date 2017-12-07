@@ -55,7 +55,7 @@ Mat imageShowMat;
 
 IplImage *mapx, *mapy;
 
-const int maxFeatureNumPerSubregion = 24;
+const int maxFeatureNumPerSubregion = 30;
 const int xSubregionNum = 12;
 const int ySubregionNum = 8;
 const int totalSubregionNum = xSubregionNum * ySubregionNum;
@@ -206,10 +206,12 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
   timeLast = timeCur;
   timeCur = imageData->header.stamp.toSec() - 0.1163;
 
-  cv_bridge::CvImageConstPtr imageDataCv = cv_bridge::toCvShare(imageData, "mono8");
+  //cv_bridge::CvImageConstPtr imageDataCv = cv_bridge::toCvShare(imageData, "mono8");
+  cv_bridge::CvImagePtr imageDataCv = cv_bridge::toCvCopy(imageData, sensor_msgs::image_encodings::MONO8);
 
   if (!systemInited) {
-    remap(imageDataCv->image, image0, mapxMap, mapyMap, CV_INTER_LINEAR);
+  	image0 = imageDataCv->image;
+    //remap(imageDataCv->image, image0, mapxMap, mapyMap, CV_INTER_LINEAR);
     systemInited = true;
 
     return;
@@ -217,14 +219,16 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
 
    
    if (isOddFrame) {
-    remap(imageDataCv->image, image1, mapxMap, mapyMap, CV_INTER_LINEAR);
+    //remap(imageDataCv->image, image1, mapxMap, mapyMap, CV_INTER_LINEAR);
 
+    image1 = imageDataCv->image;
     imageLastMat = image0;
     imageCurMat = image1;
 
   } else {
-    remap(imageDataCv->image, image0, mapxMap, mapyMap, CV_INTER_LINEAR);
+    //remap(imageDataCv->image, image0, mapxMap, mapyMap, CV_INTER_LINEAR);
     
+    image0 = imageDataCv->image;
     imageLastMat = image1;
     imageCurMat = image0;
 
@@ -236,6 +240,9 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
   imageLast = imageCur;
   imageCur = imageTemp;
 
+  featuresCurVec.clear();
+  featuresLastVec.clear();
+  featuresIndVec.clear();
   //cout << "imageLastMat.depth: " << imageLastMat.depth() << "\n";
 
   //Mat imageTempMat;
@@ -252,9 +259,9 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
   IplImage copy(cv_ptr->image);
 
   imageCur = &copy;
-  imageCurMat = cv_ptr->image;
+  //imageCurMat = cv_ptr->image;
 
-  //cout << "imageCur.size: " <<  imageCur->height << " " << imageCur->width << "\n";
+  cout << "imageCur.size: " <<  imageCur->height << " " << imageCur->width << "\n";
 
   //cv::imshow("Image", cv_ptr->image);
   //cv::waitKey(1);
@@ -338,6 +345,15 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
 
   int recordFeatureNum = totalFeatureNum;
   vector<KeyPoint> subFeatures;
+
+  gftt->setMaxFeatures(MAXFEATURENUM);
+  gftt->detect(imageLastMat, subFeatures);
+
+  KeyPoint::convert(subFeatures, featuresLastVec);
+
+  std::cout << "featuresLastVec: " << featuresLastVec.size() << "\n";
+
+/*
   for (int i = 0; i < ySubregionNum; i++) {
     for (int j = 0; j < xSubregionNum; j++) {
       int ind = xSubregionNum * i + j;
@@ -395,7 +411,7 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
             featuresIndFromStart++;
           }
         }
-        */
+        
           int numFound = 0;
           for(int k = 0; k < numToFind; k++) {
             featuresSubVec[k].x += subregionLeft;
@@ -410,8 +426,8 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
 
               numFound++;
               featuresIndFromStart++;
-            }
-}
+            	}
+			}
         totalFeatureNum += numFound;
         subregionFeatureNum[ind] += numFound;
 
@@ -419,7 +435,7 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
       }
     }
   }
-
+*/
   //cout << "totalFeatureNum: " << totalFeatureNum << "\n";
 
   cvCalcOpticalFlowPyrLK(imageLast, imageCur, pyrLast, pyrCur,
@@ -433,8 +449,18 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
            				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
            				   	                30, 0.01), 0);
 
-  //cout << "featuresLastVec.size: " << featuresLastVec.size() << "\n";
-  //cout <<  "featuresCurVec.size: " << featuresCurVec.size() << "\n";
+  //Consistency check
+  vector<Point2f> featuresLastVecConstCheck;
+
+  cv::calcOpticalFlowPyrLK(imageCurMat, imageLastMat, featuresCurVec, featuresLastVecConstCheck,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+            			   lktPyramid,
+           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+           				   	                30, 0.01), 0);
+
+  cout << "featuresLastVec.size: " << featuresLastVec.size() << "\n";
+  cout <<  "featuresCurVec.size: " << featuresCurVec.size() << "\n";
+  cout <<  "featuresLastVecConstCheck.size: " << featuresLastVecConstCheck.size() << "\n";
 
   totalFeatureNum = featuresCurVec.size();
 
@@ -454,12 +480,44 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
 
     if (!(trackDis > maxTrackDis || featuresCurVec[i].x < xBoundary || 
       featuresCurVec[i].x > imageWidth - xBoundary || featuresCurVec[i].y < yBoundary || 
-      featuresCurVec[i].y > imageHeight - yBoundary)) {
+      featuresCurVec[i].y > imageHeight - yBoundary ||
+      featuresLastVec[i].x - featuresLastVecConstCheck[i].x > 5 || 
+      featuresLastVec[i].y - featuresLastVecConstCheck[i].y > 5)) 
+    {
 
       int xInd = (int)((featuresLastVec[i].x - xBoundary) / subregionWidth);
       int yInd = (int)((featuresLastVec[i].y - yBoundary) / subregionHeight);
       int ind = xSubregionNum * yInd + xInd;
 
+        point.u = featuresCurVec[i].x;
+        point.v = featuresCurVec[i].y;
+        point.ind = featuresInd[featureCount];
+        imagePointsCur->push_back(point);
+
+        //cout << "draw point :" << point.u << " " << point.v <<  " \n";
+
+        //cv::circle(cv_ptr->image, cv::Point(point.u, point.v), 10, CV_RGB(255,255,0));
+
+          //point.u = -(featuresLastVec[featureCount].x - kImage[2]) / kImage[0];
+          //point.v = -(featuresLastVec[featureCount].y - kImage[5]) / kImage[4];
+
+          point.u = featuresLastVec[i].x;
+          point.v = featuresLastVec[i].y;
+          imagePointsLast->push_back(point);
+
+        //meanShiftX += fabs((featuresCur[featureCount].x - featuresLast[featureCount].x) / kImage[0]);
+        //meanShiftY += fabs((featuresCur[featureCount].y - featuresLast[featureCount].y) / kImage[4]);
+
+        featureCount++;
+        subregionFeatureNum[ind]++;
+
+        //cout << "featuresCurVec[featureCount]: " << featuresCurVec[featureCount].x << " " << featuresCurVec[featureCount].y << "\n";
+        //cout <<  
+
+        cv::arrowedLine(cv_ptr->image, featuresLastVec[featureCount], featuresCurVec[featureCount],
+        				 Scalar(0), 2, CV_AA);
+
+/*
       if (subregionFeatureNum[ind] < maxFeatureNumPerSubregion) {
         //featuresCurVec[featureCount].x = featuresCurVec[i].x;
         //featuresCurVec[featureCount].y = featuresCurVec[i].y;
@@ -500,6 +558,7 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
         cv::arrowedLine(cv_ptr->image, featuresLastVec[featureCount], featuresCurVec[featureCount],
         				 Scalar(0), 2, CV_AA);
       }
+      */
     }
   }
              cv::imshow("OpticalFlow", cv_ptr->image);
@@ -509,9 +568,7 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
    cout <<  "imagePointsCur.size: " << imagePointsCur->size() << "\n";
 
   totalFeatureNum = featureCount;
-  featuresCurVec.clear();
-  featuresLastVec.clear();
-  featuresIndVec.clear();
+
   //meanShiftX /= totalFeatureNum;
   //meanShiftY /= totalFeatureNum;
 

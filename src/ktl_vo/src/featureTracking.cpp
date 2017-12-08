@@ -1,7 +1,12 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+
 #include <ros/ros.h>
+#include <message_filters/subscriber.h>
+#include <message_filters/time_synchronizer.h>
+#include <message_filters/sync_policies/approximate_time.h>
+
 #include "opencv2/video/tracking.hpp"
 #include <opencv2/ximgproc/disparity_filter.hpp>
 
@@ -12,6 +17,9 @@
 
 using namespace std;
 using namespace cv;
+
+typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image,
+                                                        sensor_msgs::Image> sync_pol;
 
 bool systemInited = false;
 bool systemInitedDepth = false;
@@ -31,7 +39,9 @@ IplImage *imageHarrisNormScaled = cvCreateImage(imgSize, IPL_DEPTH_8U, 1);
 IplImage *mask;
 
 Mat image0, image1;
+Mat image0_left, image1_left, image0_right, image1_right;
 Mat imageLastMat, imageCurMat;
+Mat imageLastLeft, imageLastRight, imageCurLeft, imageCurRight;
 
 Mat imageLastDepth, imageCurDepth;
 
@@ -55,7 +65,7 @@ Mat imageShowMat;
 
 IplImage *mapx, *mapy;
 
-const int maxFeatureNumPerSubregion = 30;
+const int maxFeatureNumPerSubregion = 40;
 const int xSubregionNum = 12;
 const int ySubregionNum = 8;
 const int totalSubregionNum = xSubregionNum * ySubregionNum;
@@ -173,6 +183,7 @@ void imageDepthHandler(const sensor_msgs::Image::ConstPtr& imageData)
 
    Mat filtered_disp_vis;
    Mat depth;
+   std::vector<Point2f> featuresLastDepth;
 
    bool answ = imageLastDepth.size() ==  imageLastMat.size();
 
@@ -181,16 +192,39 @@ void imageDepthHandler(const sensor_msgs::Image::ConstPtr& imageData)
    //cout << "imageLastMat.size: " << imageLastMat.size() << "\n";
    //cout << "answ: " << answ << "\n";
 
-   if(!imageLastDepth.empty() && !imageLastMat.empty())
+   if(!imageLastDepth.empty() && !imageLastMat.empty() && !featuresLastVec.empty())
    {
-   		ComputeDepthMap(imageLastMat, imageLastDepth, depth, filtered_disp_vis);
+  
+  	cv::calcOpticalFlowPyrLK(imageLastMat, imageLastDepth, featuresLastVec, featuresLastDepth,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+            			   lktPyramid,
+           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+           				   	                30, 0.01), 0);
 
-  		imageLastDepth = imageDataCv->image;
+  	for(int i = 0; i < featuresLastDepth.size(); i++)
+  	{
+  		float disparity = (featuresLastVec[i].x-featuresLastDepth[i].x);
+  		//std::cout << "disparity: " << disparity << "\n";
+  		cv::arrowedLine(imageDataCv->image, featuresLastVec[i], featuresLastDepth[i],
+        				Scalar(0), 2, CV_AA);
 
-   		depthBridge.image = depth;
-    	depthBridge.encoding = sensor_msgs::image_encodings::TYPE_16SC1;
-    	sensor_msgs::Image::Ptr imageDepthPointer = depthBridge.toImageMsg();
-    	imageDepthPubPointer->publish(imageDepthPointer);
+  	}
+
+  	//cv::imshow("filtered disparity", imageLastDepth);
+    //cv::waitKey(1);
+
+    cv::imshow("OpticalFlow", imageDataCv->image);
+   	cv::waitKey(1);
+   	cout << "featuresLastDepth: " << featuresLastDepth.size() << "\n"; 
+
+   	ComputeDepthMap(imageLastMat, imageLastDepth, depth, filtered_disp_vis);
+
+  	imageLastDepth = imageDataCv->image;
+
+   	depthBridge.image = depth;
+    depthBridge.encoding = sensor_msgs::image_encodings::TYPE_16SC1;
+    sensor_msgs::Image::Ptr imageDepthPointer = depthBridge.toImageMsg();
+    imageDepthPubPointer->publish(imageDepthPointer);
 
    }
   	
@@ -561,8 +595,8 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
       */
     }
   }
-             cv::imshow("OpticalFlow", cv_ptr->image);
-   			cv::waitKey(1);
+             //cv::imshow("OpticalFlow", cv_ptr->image);
+   			//cv::waitKey(1);
 
    cout << "imagePointsLast.size: " << imagePointsLast->size() << "\n";
    cout <<  "imagePointsCur.size: " << imagePointsCur->size() << "\n";
@@ -603,6 +637,243 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
   }
 }
 
+void getOpticalFlow(const cv::Mat &image_1, const cv::Mat &image_2,
+					const std::vector<Point2f> &features_1,
+					const std::vector<Point2f> &features_depth,
+					std::vector<Point2f> &features_1_selected,
+					std::vector<Point2f> &features_2_selected,
+					std::vector<Point2f> &features_3_selected,
+					int y_threshold, bool temporal_flow=false)
+{
+	vector<unsigned char> featuresStatus;
+	vector<float> featuresErr;
+	vector<int> featuresIndVec;
+
+	const double maxTrackDis = 100;
+	const int winSize = 21;
+	const int lktPyramid = 4;
+
+	std::vector<Point2f> features_2;
+	std::vector<Point2f> features_1_checked;
+
+	cv::Mat imageShow;
+	image_1.copyTo(imageShow);
+
+	cv::calcOpticalFlowPyrLK(image_1, image_2, features_1, features_2,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+            			   lktPyramid,
+           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+           				   	                30, 0.01), 0);
+
+	//Consistency check
+    vector<Point2f> featuresLastVecConstCheck;
+
+    cv::calcOpticalFlowPyrLK(image_2, image_1, features_2, features_1_checked,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+            			   lktPyramid,
+           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+           				   	                30, 0.01), 0);
+
+    //std::cout << "features_1: " <<  features_1.size() << "\n";
+    //std::cout << "features_2: " << features_2.size() << "\n";
+
+    for (int i = 0; i < features_1.size(); i++) {
+    	double trackDis = sqrt((features_1[i].x - features_2[i].x) 
+                    * (features_1[i].x - features_2[i].x)
+                    + (features_1[i].y - features_2[i].y) 
+                    * (features_1[i].y - features_2[i].y));
+
+
+    	if (!(trackDis > maxTrackDis || features_2[i].x < xBoundary || 
+      		features_2[i].x > imageWidth - xBoundary || features_2[i].y < yBoundary || 
+      		features_2[i].y > imageHeight - yBoundary ||
+      		features_1[i].x - features_1_checked[i].x > 5 || 
+      		features_1[i].y - features_1_checked[i].y > y_threshold)) 
+    	{
+    		cv::arrowedLine(imageShow, features_1[i], features_2[i],
+        				 Scalar(0), 2, CV_AA);
+
+    		features_1_selected.push_back(features_1[i]);
+    		features_2_selected.push_back(features_2[i]);
+    		if(temporal_flow)
+    			features_3_selected.push_back(features_depth[i]);
+
+    	}
+
+	}
+
+	//cv::imshow("OpticalFlow", imageShow);
+   // cv::waitKey(1);
+
+    //std::cout << "features_1_selected: " << features_1_selected.size() << "\n";
+    //std::cout << "features_2_selected: " << features_2_selected.size() << "\n";
+
+}
+
+void stereoImageCallback( const sensor_msgs::ImageConstPtr& msg_left,
+						  const sensor_msgs::ImageConstPtr& msg_right)
+{
+  cout << "start callback 1  \n";
+  timeLast = timeCur;
+  timeCur = msg_left->header.stamp.toSec() - 0.1163;
+
+  //cv_bridge::CvImageConstPtr imageDataCv = cv_bridge::toCvShare(imageData, "mono8");
+  cv_bridge::CvImagePtr imageDataLeft = cv_bridge::toCvCopy(msg_left, sensor_msgs::image_encodings::MONO8);
+  cv_bridge::CvImagePtr imageDataRight = cv_bridge::toCvCopy(msg_right, sensor_msgs::image_encodings::MONO8);
+
+  if (!systemInited)
+  {
+  	imageCurLeft = imageDataLeft->image;
+  	imageCurRight = imageDataRight->image;
+    //remap(imageDataCv->image, image0, mapxMap, mapyMap, CV_INTER_LINEAR);
+    systemInited = true;
+    return;
+  }
+
+  cout << "start callback 2  \n";
+  Mat imageTempLeft = imageCurLeft;
+  Mat imageTempRight = imageCurRight;
+
+  imageLastLeft = imageCurLeft;
+  imageLastRight = imageCurRight;
+
+  imageCurLeft = imageDataLeft->image;
+  imageCurRight = imageDataRight->image;
+
+  // get points from last left image 
+  std::vector<KeyPoint> subFeatures;
+  std::vector<Point2f> featuresLastLeft;
+  std::vector<Point2f> featuresLastLeftTemp;
+  std::vector<Point2f> featuresLastLeftSelect; 
+  std::vector<Point2f> featuresLastRightTemp;
+  std::vector<Point2f> featuresLastRightSelect;
+  std::vector<Point2f> featuresTemp;
+  std::vector<Point2f> featuresCurLeftTemp;
+  std::vector<Point2f> featuresCurLeftSelect;
+
+  pcl::PointCloud<ImagePoint>::Ptr imagePointsCur(new pcl::PointCloud<ImagePoint>());
+  pcl::PointCloud<DepthPoint>::Ptr imagePointsLast(new pcl::PointCloud<DepthPoint>());
+
+
+  gftt->setMaxFeatures(MAXFEATURENUM);
+  gftt->detect(imageLastLeft, subFeatures);
+
+  KeyPoint::convert(subFeatures, featuresLastLeft);
+
+  //getOpticalFlow(imageLastLeft, imageCurLeft, featuresLastLeft, featuresTemp,
+	//			 featuresLastLeftTemp, featuresCurLeftTemp, featuresTemp, 5);
+
+  getOpticalFlow(imageLastLeft, imageLastRight, featuresLastLeft, featuresTemp,
+  				 featuresLastLeftTemp, featuresLastRightTemp, featuresTemp, 1);
+
+  getOpticalFlow(imageLastLeft, imageCurLeft, featuresLastLeftTemp, featuresLastRightTemp,
+				 featuresLastLeftSelect, featuresCurLeftSelect, featuresLastRightSelect, 5, true);
+
+  std::cout << "featuresLastLeftSelect: " << featuresLastLeftSelect.size() << "\n";
+  std::cout << "featuresCurLeftSelect: " << featuresCurLeftSelect.size() << "\n";
+  std::cout << "featuresLastRightSelect: " << featuresLastRightSelect.size() << "\n";
+
+  ImagePoint point;
+  DepthPoint depth_point;
+  for(int i =0; i < featuresLastRightSelect.size(); i++)
+  {
+
+  	float disparity = (featuresLastLeftSelect[i].x - featuresLastRightSelect[i].x);
+  	if(disparity > 0)
+  	{
+  		depth_point.u = featuresLastLeftSelect[i].x;
+        depth_point.v = featuresLastLeftSelect[i].y;
+        depth_point.depth = bf / disparity;
+        depth_point.ind = i;
+        imagePointsLast->push_back(depth_point);
+
+        //std::cout << "depth: " << depth_point.depth << "\n";
+
+        point.u = featuresCurLeftSelect[i].x;
+        point.v = featuresCurLeftSelect[i].y;
+        point.ind = i;
+        imagePointsCur->push_back(point);
+
+  	}
+
+    cv::arrowedLine(imageTempLeft, featuresLastLeftSelect[i], featuresCurLeftSelect[i],
+        				 Scalar(0), 2, CV_AA);
+
+  }
+
+  std::cout << "imagePointsLast: " << imagePointsLast->size() << "\n";
+  std::cout << "imagePointsCur: " << imagePointsCur->size() << "\n";
+  
+  cv::imshow("OpticalFlow", imageTempLeft);
+  cv::waitKey(1);
+
+  sensor_msgs::PointCloud2 imagePointsLast2;
+  pcl::toROSMsg(*imagePointsLast, imagePointsLast2);
+  imagePointsLast2.header.stamp = ros::Time().fromSec(timeLast);
+  imagePointsLastPubPointer->publish(imagePointsLast2);
+
+  sensor_msgs::PointCloud2 imagePointsCur2;
+  pcl::toROSMsg(*imagePointsCur, imagePointsCur2);
+  imagePointsCur2.header.stamp = ros::Time().fromSec(timeLast);
+  imagePointsCurPubPointer->publish(imagePointsCur2);
+
+  // calculate left-right optical flow
+/*
+  cv::calcOpticalFlowPyrLK(imageLastLeft, imageLastRight, featuresLastLeft, featuresLastRight,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+            			   lktPyramid,
+           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+           				   	                30, 0.01), 0);
+
+   //Consistency check
+  vector<Point2f> featuresLastVecConstCheck;
+
+  cv::calcOpticalFlowPyrLK(imageLastRight, imageLastLeft, featuresLastRight, featuresLastVecConstCheck,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+            			   lktPyramid,
+           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+           				   	                30, 0.01), 0);
+
+  for (int i = 0; i < totalFeatureNum; i++) {
+    double trackDis = sqrt((featuresLastVec[i].x - featuresCurVec[i].x) 
+                    * (featuresLastVec[i].x - featuresCurVec[i].x)
+                    + (featuresLastVec[i].y - featuresCurVec[i].y) 
+                    * (featuresLastVec[i].y - featuresCurVec[i].y));
+
+
+    if (!(trackDis > maxTrackDis || featuresCurVec[i].x < xBoundary || 
+      featuresCurVec[i].x > imageWidth - xBoundary || featuresCurVec[i].y < yBoundary || 
+      featuresCurVec[i].y > imageHeight - yBoundary ||
+      featuresLastVec[i].x - featuresLastVecConstCheck[i].x > 5 || 
+      featuresLastVec[i].y - featuresLastVecConstCheck[i].y > 5)) 
+    {
+*/
+
+
+/*
+  cv::calcOpticalFlowPyrLK(imageLastLeft, imageCurLeft, featuresLastVec, featuresCurVec,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+            			   lktPyramid,
+           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+           				   	                30, 0.01), 0);
+
+  //Consistency check
+  //vector<Point2f> featuresLastVecConstCheck;
+
+  cv::calcOpticalFlowPyrLK(imageCurLeft, imageLastLeft, featuresCurVec, featuresLastVecConstCheck,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+            			   lktPyramid,
+           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+           				   	                30, 0.01), 0);
+
+  cout << "featuresLastVec.size: " << featuresLastVec.size() << "\n";
+  cout <<  "featuresCurVec.size: " << featuresCurVec.size() << "\n";
+  cout <<  "featuresLastVecConstCheck.size: " << featuresLastVecConstCheck.size() << "\n";
+
+  totalFeatureNum = featuresCurVec.size();
+*/
+}
+
 int main(int argc, char** argv)
 {
   ros::init(argc, argv, "featureTracking");
@@ -630,10 +901,24 @@ int main(int argc, char** argv)
   cvNamedWindow( "OpticalFlow", CV_WINDOW_AUTOSIZE );
   cv::namedWindow("filtered disparity", cv::WINDOW_AUTOSIZE);
 
-  ros::Subscriber imageDataSub = nh.subscribe<sensor_msgs::Image>("/kitti/camera_gray_left/image_raw", 1, imageDataHandler);
-  ros::Subscriber imageDepthSub = nh.subscribe<sensor_msgs::Image>("/kitti/camera_gray_right/image_raw", 1, imageDepthHandler);
-   
+  //ros::Subscriber imageDataSub = 
+  //				nh.subscribe<sensor_msgs::Image>("/kitti/camera_gray_left/image_raw", 1, imageDataHandler);
+  //ros::Subscriber imageDepthSub =
+  //			    nh.subscribe<sensor_msgs::Image>("/kitti/camera_gray_right/image_raw", 1, imageDepthHandler);
 
+  std::shared_ptr<message_filters::Subscriber<sensor_msgs::Image>> left_sub_ = 
+      std::shared_ptr<message_filters::Subscriber<sensor_msgs::Image>>(
+                        new message_filters::Subscriber<sensor_msgs::Image>(nh, "/kitti/camera_gray_left/image_raw", 1));
+  
+  std::shared_ptr<message_filters::Subscriber<sensor_msgs::Image>> right_sub_ = 
+      std::shared_ptr<message_filters::Subscriber<sensor_msgs::Image>>(
+      					new message_filters::Subscriber<sensor_msgs::Image>(nh, "/kitti/camera_gray_right/image_raw", 1));
+
+  std::shared_ptr<message_filters::Synchronizer<sync_pol>> sync_ = 
+  			sync_ = std::shared_ptr<message_filters::Synchronizer<sync_pol>>(
+      			new message_filters::Synchronizer<sync_pol>(sync_pol(10), *left_sub_, *right_sub_));
+
+  sync_->registerCallback(boost::bind(stereoImageCallback, _1, _2));
 
   ros::Publisher imagePointsLastPub = nh.advertise<sensor_msgs::PointCloud2> ("/image_points_last", 5);
   imagePointsLastPubPointer = &imagePointsLastPub;

@@ -21,6 +21,7 @@ find_package(catkin REQUIRED COMPONENTS
     visualization_msgs
   	pcl_ros
   	cv_bridge
+  	message_filters
 )
 
 ## System dependencies are found with CMake's conventions

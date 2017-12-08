@@ -2,8 +2,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <iostream>
-#include <ros/ros.h>
 
+#include <ros/ros.h>
+#include <message_filters/subscriber.h>
+#include <message_filters/time_synchronizer.h>
+#include <message_filters/sync_policies/approximate_time.h>
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Imu.h>
 
@@ -17,6 +20,9 @@
 #include "pointDefinition.h"
 
 using namespace cv;
+
+typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2,
+                                                        sensor_msgs::PointCloud2> sync_pol;
 
 const double PI = 3.1415926;
 
@@ -102,8 +108,19 @@ cv::Mat A_matrix = cv::Mat::zeros(3, 3, CV_64FC1);   // intrinsic camera paramet
 cv::Mat inliersIdx;
 int pnpMethod = cv::SOLVEPNP_ITERATIVE;
 int iterationsCount = 500;
-float reprojectionError = 2.0;
-float confidence = 0.95;
+float reprojectionError = 0.1;
+float confidence = 0.99;
+
+  // For visualization
+
+  cv::Mat traj = cv::Mat::zeros(600, 600, CV_8UC3);
+  char text[100];
+  int fontFace = cv::FONT_HERSHEY_PLAIN;
+  double fontScale = 1;
+  int thickness = 1;
+  cv::Point textOrg(10, 50);
+  cv::Mat frameVis;
+  cv::Scalar red(0, 0, 255);
 
 
 void disparityHandler(const sensor_msgs::Image::ConstPtr& dispImage )
@@ -178,13 +195,13 @@ void UpdatePoseMatrices()
     mOw = -mRcw.t()*mtcw;
 }
 
-cv::Mat UnprojectStereo(cv::Point2f point2f)
+cv::Mat UnprojectStereo(cv::Point3f point3f)
 {
-    const float z =findDepth(point2f);
+    const float z = point3f.z;
     if(z>0)
     {
-        const float u = point2f.x;
-        const float v = point2f.y;
+        const float u = point3f.x;
+        const float v = point3f.y;
         const float x = (u - kImage[2]) * z / kImage[0];
         const float y = (v - kImage[5]) * z / kImage[4];
         cv::Mat x3Dc = (cv::Mat_<float>(3,1) << x, y, z);
@@ -242,11 +259,15 @@ void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
   imagePointsLast->clear();
   pcl::fromROSMsg(*imagePoints2, *imagePointsLast);
 
+     std::cout << "imagePointsLastOdom.size: " << imagePointsLast->size() << "\n";
+   //cout <<  "imagePointsCur.size: " << imagePointsCur->size() << "\n";
+
   if(!disparity.empty())
   {
     for (int i = 0; i < imagePointsLast->size(); i++)
     {
-      cv::Mat point3dMat = UnprojectStereo(cv::Point2f(imagePointsLast->points[i].u, imagePointsLast->points[i].v));
+      //cv::Mat point3dMat = UnprojectStereo(cv::Point2f(imagePointsLast->points[i].u, imagePointsLast->points[i].v));
+      cv::Mat point3dMat;
       if (!point3dMat.empty())
       {
 
@@ -371,6 +392,67 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
   imageShowPubPointer->publish(imagePointer);
 }
 
+
+void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast,
+                        const sensor_msgs::PointCloud2ConstPtr& pointCloudCur)
+{
+
+  pcl::PointCloud<ImagePoint>::Ptr imagePointsCur(new pcl::PointCloud<ImagePoint>());
+  pcl::PointCloud<DepthPoint>::Ptr imagePointsLast(new pcl::PointCloud<DepthPoint>());
+  std::vector<cv::Point3f> mvP3Dw;
+  std::vector<cv::Point2f> mvP2D;
+  cv::Mat mTcw_local = cv::Mat::eye(4,4,CV_32F);
+
+  imagePointsLastTime = depthCloudLast->header.stamp.toSec();
+
+  pcl::fromROSMsg(*depthCloudLast, *imagePointsLast);
+  pcl::fromROSMsg(*pointCloudCur, *imagePointsCur);
+
+  std::cout << "imagePointsLast.size: " << imagePointsLast->size() << "\n";
+  std::cout << "imagePointsCur.size: " << imagePointsCur->size() << "\n";
+
+  for (int i = 0; i < imagePointsLast->size(); i++)
+    {
+      
+      cv::Mat point3D = UnprojectStereo(cv::Point3f(imagePointsLast->points[i].u,
+                                                   imagePointsLast->points[i].v,
+                                                   imagePointsLast->points[i].depth));
+
+      mvP3Dw.push_back(cv::Point3f(point3D.at<float>(0), point3D.at<float>(1), point3D.at<float>(2)));
+
+      mvP2D.push_back(cv::Point2f(imagePointsCur->points[i].u, imagePointsCur->points[i].v));
+      
+      //std::cout << "depth: " << depth << "\n";
+
+      //ImagePoint ip = imagePointsLast->points[i];
+    }
+
+      std::cout << "mvP3Dw: " << mvP3Dw.size() << "\n";
+      std::cout << "mvP2D: " << mvP2D.size() << "\n";
+
+      estimatePoseRANSAC(mvP3Dw, mvP2D, pnpMethod, inliersIdx,
+                      iterationsCount, reprojectionError, confidence, mTcw_local);
+
+      mTcw = mTcw * mTcw_local;
+
+      std::cout << "mTcw_local: " << mTcw_local << "\n";
+      //std::cout << "mTcw: " << mTcw << "\n";
+      //UpdatePoseMatrices();
+
+
+  float x = mTcw.at<float>(0, 3) + 300.0;
+  float y = mTcw.at<float>(2, 3) + 300.0;
+  cv::circle(traj, cv::Point(x, y), 1, CV_RGB(255, 0, 0), 2);
+  cv::rectangle(traj, cv::Point(10, 30), cv::Point(550, 50), CV_RGB(0, 0, 0), CV_FILLED);
+  std::cout << "x, y: " << x << " " << y << "\n";
+  sprintf(text, "Coordinates: x=%02fm, y=%02fm, z=%02fm", mTcw.at<float>(0, 3), mTcw.at<float>(1, 3), mTcw.at<float>(2, 3));
+  cv::putText(traj, text, textOrg, fontFace, fontScale, cv::Scalar::all(255), thickness, 8);
+  
+  cv::imshow("Trajectory", traj);
+  cv::waitKey(1);
+
+}
+
 int main(int argc, char** argv)
 {
   ros::init(argc, argv, "visualOdometry");
@@ -383,15 +465,31 @@ int main(int argc, char** argv)
   A_matrix.at<double>(2, 2) = 1;
 
 
-  ros::Subscriber imagePointsSub = nh.subscribe<sensor_msgs::PointCloud2>
-                                   ("/image_points_last", 5, imagePointsHandler);
+  //ros::Subscriber imagePointsSub = nh.subscribe<sensor_msgs::PointCloud2>
+  //                                 ("/image_points_last", 5, imagePointsHandler);
 
-  ros::Subscriber depthCloudSub = nh.subscribe<sensor_msgs::PointCloud2> 
-                                  ("/kitti/velo/pointcloud", 5, depthCloudHandler);
+  //ros::Subscriber depthCloudSub = nh.subscribe<sensor_msgs::PointCloud2> 
+  //                                ("/kitti/velo/pointcloud", 5, depthCloudHandler);
 
   ros::Subscriber imuDataSub = nh.subscribe<sensor_msgs::Imu> ("/kitti/oxts/imu", 5, imuDataHandler);
 
   ros::Subscriber dispSub = nh.subscribe<sensor_msgs::Image> ("/image/depth", 5, disparityHandler);
+
+  std::shared_ptr<message_filters::Subscriber<sensor_msgs::PointCloud2>> last_img_sub = 
+      std::shared_ptr<message_filters::Subscriber<sensor_msgs::PointCloud2>>(
+                        new message_filters::Subscriber<sensor_msgs::PointCloud2>(nh, "/image_points_last", 5));
+  
+  std::shared_ptr<message_filters::Subscriber<sensor_msgs::PointCloud2>> cur_img_sub = 
+      std::shared_ptr<message_filters::Subscriber<sensor_msgs::PointCloud2>>(
+                new message_filters::Subscriber<sensor_msgs::PointCloud2>(nh, "/image_points_cur", 5));
+
+  std::shared_ptr<message_filters::Synchronizer<sync_pol>> sync_ = 
+        sync_ = std::shared_ptr<message_filters::Synchronizer<sync_pol>>(
+            new message_filters::Synchronizer<sync_pol>(sync_pol(10), *last_img_sub, *cur_img_sub));
+
+  sync_->registerCallback(boost::bind(pointCloudCallback, _1, _2));
+
+  cv::namedWindow("Trajectory", cv::WINDOW_AUTOSIZE);
 
   ros::Publisher voDataPub = nh.advertise<nav_msgs::Odometry> ("/cam_to_init", 5);
   voDataPubPointer = &voDataPub;

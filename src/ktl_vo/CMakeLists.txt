@@ -4,6 +4,12 @@ project(ktl_vo)
 SET(CMAKE_INCLUDE_PATH ${CMAKE_INCLUDE_PATH} "/home/alex/Downloads/boost_1_65_0")
 SET(CMAKE_LIBRARY_PATH ${CMAKE_LIBRARY_PATH} "/home/alex/Boost_1_65/lib")
 
+#SET(CMAKE_INCLUDE_PATH ${CMAKE_INCLUDE_PATH} "/home/alex/slambook/3rdparty/g2o/")
+#SET(CMAKE_LIBRARY_PATH ${CMAKE_LIBRARY_PATH} "/home/alex/slambook/3rdparty/g2o/lib")
+#set(CMAKE_MODULE_PATH "/home/alex/slambook/3rdparty/g2o/")
+list( APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake_modules )
+#MESSAGE (${PROJECT_SOURCE_DIR})
+
 ## Add support for C++11, supported in ROS Kinetic and newer
 add_definitions(-std=c++11)
 
@@ -29,6 +35,11 @@ find_package(catkin REQUIRED COMPONENTS
 find_package(Boost REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV 3 REQUIRED)
+
+find_package( CSparse REQUIRED )
+find_package( G2O REQUIRED)
+
+
 
 MESSAGE(${roscpp_FOUND})
 MESSAGE(${roscpp_LIBRARIES})
@@ -144,6 +155,10 @@ include_directories(${catkin_INCLUDE_DIRS})
 include_directories( ${OpenCV_INCLUDE_DIRS} )
 include_directories("${PROJECT_SOURCE_DIR}/include")
 
+include_directories(${CSPARSE_INCLUDE_DIR})
+
+include_directories( ${G2O_INCLUDE_DIRS} )
+
 ## Declare a C++ library
 # add_library(${PROJECT_NAME}
 #   src/${PROJECT_NAME}/ktl_vo.cpp
@@ -154,6 +169,11 @@ include_directories("${PROJECT_SOURCE_DIR}/include")
 ## either from message generation or dynamic reconfigure
 # add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
+SET(G2O_LIBS g2o_cli g2o_ext_freeglut_minimal g2o_simulator g2o_solver_slam2d_linear 
+    g2o_types_icp g2o_types_slam2d g2o_types_sba g2o_types_slam3d g2o_core g2o_interface 
+    g2o_solver_csparse g2o_solver_structure_only g2o_csparse_extension g2o_opengl_helper g2o_solver_dense 
+    g2o_stuff g2o_types_sclam2d g2o_parser g2o_solver_pcg g2o_types_data g2o_types_sim3 cxsparse )
+    
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
 ## The recommended prefix ensures that target names across packages don't collide
@@ -163,7 +183,7 @@ include_directories("${PROJECT_SOURCE_DIR}/include")
 
    add_executable(visual_odometry_node src/visualOdometry.cpp)
    target_link_libraries(visual_odometry_node ${catkin_LIBRARIES}
-   						 ${OpenCV_LIBS} ${EIGEN3_LIBS})
+   						 ${OpenCV_LIBS} ${EIGEN3_LIBS} ${G2O_LIBS})
 
 #add_executable(laser_mapper_node src/laser_mapper_node.cpp)
 #target_link_libraries(feature_tracking_node ${catkin_LIBRARIES} ${PROJECT_NAME})

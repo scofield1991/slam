@@ -19,6 +19,15 @@
 #include "cameraParameters.h"
 #include "pointDefinition.h"
 
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+#include "g2o/core/base_vertex.h"
+#include "g2o/core/base_unary_edge.h"
+#include <g2o/core/block_solver.h>
+#include <g2o/core/optimization_algorithm_levenberg.h>
+#include <g2o/solvers/csparse/linear_solver_csparse.h>
+#include <g2o/types/sba/types_six_dof_expmap.h>
+
 using namespace cv;
 
 typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2,
@@ -93,6 +102,7 @@ cv::Mat disparity;
 std::vector<cv::Point3f> mvP3Dw;
 std::vector<cv::Point2f> mvP2D;
 
+cv::Mat kMat = cv::Mat(3, 3, CV_64FC1, kImage);
 // Camera pose.
 cv::Mat mTcw = cv::Mat::eye(4,4,CV_32F);
 
@@ -392,6 +402,89 @@ void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData)
   imageShowPubPointer->publish(imagePointer);
 }
 
+cv::Mat toCvMat(const Eigen::Matrix<double,4,4> &m)
+{
+    cv::Mat cvMat(4,4,CV_32F);
+    for(int i=0;i<4;i++)
+        for(int j=0; j<4; j++)
+            cvMat.at<float>(i,j)=m(i,j);
+
+    return cvMat.clone();
+}
+
+void bundleAdjustment (
+    const std::vector< cv::Point3f > points_3d,
+    const std::vector< cv::Point2f > points_2d,
+    const cv::Mat& K, cv::Mat& R, cv::Mat& t )
+{
+    // 初始化g2o
+    typedef g2o::BlockSolver< g2o::BlockSolverTraits<6,3> > Block;  // pose 维度为 6, landmark 维度为 3
+    Block::LinearSolverType* linearSolver = new g2o::LinearSolverCSparse<Block::PoseMatrixType>(); // 线性方程求解器
+    Block* solver_ptr = new Block ( linearSolver );     // 矩阵块求解器
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg ( solver_ptr );
+    g2o::SparseOptimizer optimizer;
+    optimizer.setAlgorithm ( solver );
+
+    // vertex
+    g2o::VertexSE3Expmap* pose = new g2o::VertexSE3Expmap(); // camera pose
+    Eigen::Matrix3d R_mat;
+    R_mat <<
+          R.at<double> ( 0,0 ), R.at<double> ( 0,1 ), R.at<double> ( 0,2 ),
+               R.at<double> ( 1,0 ), R.at<double> ( 1,1 ), R.at<double> ( 1,2 ),
+               R.at<double> ( 2,0 ), R.at<double> ( 2,1 ), R.at<double> ( 2,2 );
+    pose->setId ( 0 );
+    pose->setEstimate ( g2o::SE3Quat (
+                            R_mat,
+                            Eigen::Vector3d ( t.at<double> ( 0,0 ), t.at<double> ( 1,0 ), t.at<double> ( 2,0 ) )
+                        ) );
+    optimizer.addVertex ( pose );
+
+    int index = 1;
+    for ( const cv::Point3f p:points_3d )   // landmarks
+    {
+        g2o::VertexSBAPointXYZ* point = new g2o::VertexSBAPointXYZ();
+        point->setId ( index++ );
+        point->setEstimate ( Eigen::Vector3d ( p.x, p.y, p.z ) );
+        point->setMarginalized ( true ); // g2o 中必须设置 marg 参见第十讲内容
+        optimizer.addVertex ( point );
+    }
+
+    // parameter: camera intrinsics
+    g2o::CameraParameters* camera = new g2o::CameraParameters (
+        K.at<double> ( 0,0 ), Eigen::Vector2d ( K.at<double> ( 0,2 ), K.at<double> ( 1,2 ) ), 0
+    );
+    camera->setId ( 0 );
+    optimizer.addParameter ( camera );
+
+    // edges
+    index = 1;
+    for ( const cv::Point2f p:points_2d )
+    {
+        g2o::EdgeProjectXYZ2UV* edge = new g2o::EdgeProjectXYZ2UV();
+        edge->setId ( index );
+        edge->setVertex ( 0, dynamic_cast<g2o::VertexSBAPointXYZ*> ( optimizer.vertex ( index ) ) );
+        edge->setVertex ( 1, pose );
+        edge->setMeasurement ( Eigen::Vector2d ( p.x, p.y ) );
+        edge->setParameterId ( 0,0 );
+        edge->setInformation ( Eigen::Matrix2d::Identity() );
+        optimizer.addEdge ( edge );
+        index++;
+    }
+
+    optimizer.setVerbose ( false );
+    optimizer.initializeOptimization();
+    optimizer.optimize ( 100 );
+
+    std::cout<< "after optimization: "<< std::endl;
+    std::cout<<"T= "<<Eigen::Isometry3d ( pose->estimate() ).matrix() << std::endl;
+    cv::Mat T = toCvMat(Eigen::Isometry3d ( pose->estimate() ).matrix());
+
+    T(cv::Range(0, 3), cv::Range(0, 3)).copyTo(R);
+    T(cv::Range(0, 3), cv::Range(3, 4)).copyTo(t);
+
+          //R_local.copyTo(T(cv::Range(0, 3), cv::Range(0, 3)));
+      //t_local.copyTo(T(cv::Range(0, 3), cv::Range(3, 4)));
+}
 
 void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast,
                         const sensor_msgs::PointCloud2ConstPtr& pointCloudCur)
@@ -408,8 +501,8 @@ void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast,
   pcl::fromROSMsg(*depthCloudLast, *imagePointsLast);
   pcl::fromROSMsg(*pointCloudCur, *imagePointsCur);
 
-  std::cout << "imagePointsLast.size: " << imagePointsLast->size() << "\n";
-  std::cout << "imagePointsCur.size: " << imagePointsCur->size() << "\n";
+  //std::cout << "imagePointsLast.size: " << imagePointsLast->size() << "\n";
+  //std::cout << "imagePointsCur.size: " << imagePointsCur->size() << "\n";
 
   for (int i = 0; i < imagePointsLast->size(); i++)
     {
@@ -433,9 +526,26 @@ void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast,
       estimatePoseRANSAC(mvP3Dw, mvP2D, pnpMethod, inliersIdx,
                       iterationsCount, reprojectionError, confidence, mTcw_local);
 
-      mTcw = mTcw * mTcw_local;
+      std::vector<cv::Point2f> points2DInliers;
+      for(int inliersIndex = 0; inliersIndex < inliersIdx.rows; inliersIndex++)
+      {
+        int n = inliersIdx.at<int>(inliersIndex);
+        cv::Point2f point2D = mvP2D[n];
+        points2DInliers.push_back(point2D);
+      }
+
+      cv::Mat R_local = mTcw_local.rowRange(0,3).colRange(0,3);
+      cv::Mat t_local = mTcw_local.rowRange(0,3).col(3);
 
       std::cout << "mTcw_local: " << mTcw_local << "\n";
+
+      bundleAdjustment ( mvP3Dw, mvP2D, kMat, R_local, t_local);
+
+      std::cout << "points2DInliers: " << points2DInliers.size() << "\n";
+
+      mTcw = mTcw * mTcw_local;
+
+      
       //std::cout << "mTcw: " << mTcw << "\n";
       //UpdatePoseMatrices();
 

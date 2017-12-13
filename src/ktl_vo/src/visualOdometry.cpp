@@ -459,8 +459,8 @@ int main(int argc, char** argv)
   ros::NodeHandle nh;
 
   A_matrix.at<double>(0, 0) = kImage[0];       //      [ fx   0  cx ]
-  A_matrix.at<double>(1, 1) = kImage[2];       //      [  0  fy  cy ]
-  A_matrix.at<double>(0, 2) = kImage[4];       //      [  0   0   1 ]
+  A_matrix.at<double>(0, 2) = kImage[2];       //      [  0  fy  cy ]
+  A_matrix.at<double>(1, 1) = kImage[4];       //      [  0   0   1 ]
   A_matrix.at<double>(1, 2) = kImage[5];
   A_matrix.at<double>(2, 2) = 1;
 

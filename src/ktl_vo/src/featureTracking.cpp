@@ -65,8 +65,8 @@ Mat imageShowMat;
 
 IplImage *mapx, *mapy;
 
-const int maxFeatureNumPerSubregion = 30;
-const int xSubregionNum = 16;
+const int maxFeatureNumPerSubregion = 100;
+const int xSubregionNum = 20;
 const int ySubregionNum = 8;
 const int totalSubregionNum = xSubregionNum * ySubregionNum;
 const int MAXFEATURENUM = maxFeatureNumPerSubregion * totalSubregionNum;
@@ -95,7 +95,7 @@ vector<float> featuresErr;
 vector<int> featuresIndVec;
 
 //(30, qualityLevel=0.01, minDistance=1, blockSize=3, useHarrisDetector=true, k=0.04);
-cv::Ptr<cv::GFTTDetector> gftt = cv::GFTTDetector::create(30, 0.001, 10, 3, true, 0.04);
+cv::Ptr<cv::GFTTDetector> gftt = cv::GFTTDetector::create(100, 0.01, 10, 3, true, 0.0);
 
 int featuresIndFromStart = 0;
 int featuresInd[2 * MAXFEATURENUM] = {0};
@@ -291,10 +291,36 @@ void adaptiveNonMaximalSuppresion( std::vector<cv::KeyPoint>& keypoints,
         }
       }
 
-      std::cout << "anmsPts: " << anmsPts.size() << "\n";
+      //std::cout << "anmsPts: " << anmsPts.size() << "\n";
 
       anmsPts.swap( keypoints );
     }
+
+float findDepth ( const cv::Point2f& pt, cv::Mat &disparity)
+{
+    int x = cvRound(pt.x);
+    int y = cvRound(pt.y);
+    ushort d = disparity.ptr<ushort>(y)[x];
+    if ( d!=0 )
+    {
+        return  (float(d)/16);
+    }
+    else 
+    {
+        // check the nearby points 
+        int dx[4] = {-1,0,1,0};
+        int dy[4] = {0,-1,0,1};
+        for ( int i=0; i<4; i++ )
+        {
+            d = disparity.ptr<ushort>( y+dy[i] )[x+dx[i]];
+            if ( d!=0 )
+            {
+                return  (float(d)/16);   // ?? base_line / d 
+            }
+        }
+    }
+    return -1.0;
+}
 
 void stereoImageCallback( const sensor_msgs::ImageConstPtr& msg_left,
 						  const sensor_msgs::ImageConstPtr& msg_right)
@@ -373,10 +399,62 @@ void stereoImageCallback( const sensor_msgs::ImageConstPtr& msg_left,
   adaptiveNonMaximalSuppresion(keypointsLeftLast, 1000);
   KeyPoint::convert(keypointsLeftLast, featuresLastLeft);
 
+  //left-right-past-current check
+  std::vector<Point2f> featuresPrevRight;
+  std::vector<Point2f> featuresCurLeft;
+  std::vector<Point2f> featuresCurLeftRight;
+  std::vector<Point2f> featuresPrevCurRight;
+  std:vector<Point2f> selectedFeatures;
+  std::vector<unsigned char> featuresStatus;
+  std::vector<float> featuresErr;
+
+  cv::calcOpticalFlowPyrLK(imageLastLeft, imageLastRight, featuresLastLeft, featuresPrevRight,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+                           lktPyramid,
+                           cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+                                            30, 0.01), 0);
+
+  cv::calcOpticalFlowPyrLK(imageLastLeft, imageCurLeft, featuresLastLeft, featuresCurLeft,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+                           lktPyramid,
+                           cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+                                            30, 0.01), 0);
+  
+  cv::calcOpticalFlowPyrLK(imageLastRight, imageCurRight, featuresPrevRight, featuresPrevCurRight,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+                           lktPyramid,
+                           cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+                                            30, 0.01), 0);
+
+  cv::calcOpticalFlowPyrLK(imageCurLeft, imageCurRight, featuresCurLeft, featuresCurLeftRight,
+                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
+                           lktPyramid,
+                           cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
+                                            30, 0.01), 0);
+
+  std::cout << "featuresPrevRight: " << featuresPrevRight.size() << "\n";
+  std::cout << "featuresCurLeft: " << featuresCurLeft.size() << "\n";
+  std::cout << "featuresPrevCurRight: " << featuresPrevCurRight.size() << "\n";
+  std::cout << "featuresCurLeftRight: " << featuresCurLeftRight.size() << "\n";
+
+for (int i = 0; i < featuresCurLeftRight.size(); i++)
+{
+  //std::cout << "featuresPrevCurRight[i].x: " << featuresPrevCurRight[i].x << "featuresCurLeftRight[i].x: " << featuresCurLeftRight[i].x << "\n"; 
+  if( std::abs(featuresPrevCurRight[i].x - featuresCurLeftRight[i].x < 2) &&
+     std::abs(featuresPrevCurRight[i].y - featuresCurLeftRight[i].y < 2))
+  {
+    selectedFeatures.push_back(featuresLastLeft[i]);
+  }
+
+}
+
+std::cout << "selectedFeatures: " << selectedFeatures.size() << "\n";
+ 
+
   //getOpticalFlow(imageLastLeft, imageCurLeft, featuresLastLeft, featuresTemp,
 	//			 featuresLastLeftTemp, featuresCurLeftTemp, featuresTemp, 5);
 
-  getOpticalFlow(imageLastLeft, imageLastRight, featuresLastLeft, featuresTemp,
+  getOpticalFlow(imageLastLeft, imageLastRight, selectedFeatures, featuresTemp,
   				 featuresLastLeftTemp, featuresLastRightTemp, featuresTemp, 1);
 
   getOpticalFlow(imageLastLeft, imageCurLeft, featuresLastLeftTemp, featuresLastRightTemp,
@@ -386,14 +464,19 @@ void stereoImageCallback( const sensor_msgs::ImageConstPtr& msg_left,
   std::cout << "featuresCurLeftSelect: " << featuresCurLeftSelect.size() << "\n";
   std::cout << "featuresLastRightSelect: " << featuresLastRightSelect.size() << "\n";
 
+  cv::Mat depthMap;
+  cv::Mat filteredDepthMap;
+  //ComputeDepthMap(imageLastLeft, imageLastRight, depthMap, filteredDepthMap);
+
   ImagePoint point;
   DepthPoint depth_point;
   for(int i =0; i < featuresLastRightSelect.size(); i++)
   {
 
   	float disparity = (featuresLastLeftSelect[i].x - featuresLastRightSelect[i].x);
+    //float disparity = findDepth(cv::Point2f(featuresLastLeftSelect[i].x, featuresLastLeftSelect[i].y), depthMap);
     float depth  = bf / disparity;
-    float mThDepth = bf * 70.0f / kImage[0];
+    float mThDepth = bf * 80.0f / kImage[0];
   	if(depth > 0 && depth < mThDepth)
   	{
   		  depth_point.u = featuresLastLeftSelect[i].x;
@@ -414,12 +497,10 @@ void stereoImageCallback( const sensor_msgs::ImageConstPtr& msg_left,
 
   	}
 
-
-
   }
 
-  std::cout << "imagePointsLast: " << imagePointsLast->size() << "\n";
-  std::cout << "imagePointsCur: " << imagePointsCur->size() << "\n";
+  //std::cout << "imagePointsLast: " << imagePointsLast->size() << "\n";
+  //std::cout << "imagePointsCur: " << imagePointsCur->size() << "\n";
   
   cv::imshow("OpticalFlow", imageTempLeft);
   cv::waitKey(1);
@@ -434,61 +515,6 @@ void stereoImageCallback( const sensor_msgs::ImageConstPtr& msg_left,
   imagePointsCur2.header.stamp = ros::Time().fromSec(timeLast);
   imagePointsCurPubPointer->publish(imagePointsCur2);
 
-  // calculate left-right optical flow
-/*
-  cv::calcOpticalFlowPyrLK(imageLastLeft, imageLastRight, featuresLastLeft, featuresLastRight,
-                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
-            			   lktPyramid,
-           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
-           				   	                30, 0.01), 0);
-
-   //Consistency check
-  vector<Point2f> featuresLastVecConstCheck;
-
-  cv::calcOpticalFlowPyrLK(imageLastRight, imageLastLeft, featuresLastRight, featuresLastVecConstCheck,
-                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
-            			   lktPyramid,
-           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
-           				   	                30, 0.01), 0);
-
-  for (int i = 0; i < totalFeatureNum; i++) {
-    double trackDis = sqrt((featuresLastVec[i].x - featuresCurVec[i].x) 
-                    * (featuresLastVec[i].x - featuresCurVec[i].x)
-                    + (featuresLastVec[i].y - featuresCurVec[i].y) 
-                    * (featuresLastVec[i].y - featuresCurVec[i].y));
-
-
-    if (!(trackDis > maxTrackDis || featuresCurVec[i].x < xBoundary || 
-      featuresCurVec[i].x > imageWidth - xBoundary || featuresCurVec[i].y < yBoundary || 
-      featuresCurVec[i].y > imageHeight - yBoundary ||
-      featuresLastVec[i].x - featuresLastVecConstCheck[i].x > 5 || 
-      featuresLastVec[i].y - featuresLastVecConstCheck[i].y > 5)) 
-    {
-*/
-
-
-/*
-  cv::calcOpticalFlowPyrLK(imageLastLeft, imageCurLeft, featuresLastVec, featuresCurVec,
-                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
-            			   lktPyramid,
-           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
-           				   	                30, 0.01), 0);
-
-  //Consistency check
-  //vector<Point2f> featuresLastVecConstCheck;
-
-  cv::calcOpticalFlowPyrLK(imageCurLeft, imageLastLeft, featuresCurVec, featuresLastVecConstCheck,
-                           featuresStatus, featuresErr, cv::Size(winSize, winSize),
-            			   lktPyramid,
-           				   cv::TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 
-           				   	                30, 0.01), 0);
-
-  cout << "featuresLastVec.size: " << featuresLastVec.size() << "\n";
-  cout <<  "featuresCurVec.size: " << featuresCurVec.size() << "\n";
-  cout <<  "featuresLastVecConstCheck.size: " << featuresLastVecConstCheck.size() << "\n";
-
-  totalFeatureNum = featuresCurVec.size();
-*/
 }
 
 int main(int argc, char** argv)

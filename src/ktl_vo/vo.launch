@@ -1,8 +1,7 @@
 <launch>
 
   <node pkg="ktl_vo" type="feature_tracking_node" name="feature_tracking_node" output="screen"/>
-   <node pkg="ktl_vo" type="visual_odometry_node" name="visual_odometry_node" output="screen"/>
-
-
+  <node pkg="ktl_vo" type="visual_odometry_node" name="visual_odometry_node" output="screen"/>
+  <node pkg="ktl_vo" type="optimization_node" name="optimization_node" output="screen"/>
 
 </launch>

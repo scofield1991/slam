@@ -10,6 +10,11 @@
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Imu.h>
 
+#include <ktl_vo/transform_msg.h>
+#include "std_msgs/MultiArrayLayout.h"
+#include "std_msgs/MultiArrayDimension.h"
+#include "std_msgs/Float32MultiArray.h"
+
 #include <opencv2/ximgproc/disparity_filter.hpp>
 
 #include <tf/transform_datatypes.h>
@@ -34,6 +39,7 @@ typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2
                                                         sensor_msgs::PointCloud2> sync_pol;
 
 const double PI = 3.1415926;
+double timeCur, timeLast;
 
 pcl::PointCloud<ImagePoint>::Ptr imagePointsCur(new pcl::PointCloud<ImagePoint>());
 pcl::PointCloud<ImagePoint>::Ptr imagePointsLast(new pcl::PointCloud<ImagePoint>());
@@ -112,90 +118,28 @@ cv::Mat mtcw = mTcw.rowRange(0,3).col(3);
 cv::Mat mRwc =  mRcw.t();;
 cv::Mat mOw = -mRcw.t()*mtcw; //==mtwc
 
-cv::Mat A_matrix = cv::Mat::zeros(3, 3, CV_64FC1);   // intrinsic camera parameters
-
 //RANSAC parameters
 cv::Mat inliersIdx;
-int pnpMethod = cv::SOLVEPNP_ITERATIVE;
-int iterationsCount = 500;
+int pnpMethod = cv::SOLVEPNP_P3P;
+int iterationsCount = 300;
 float reprojectionError = 0.1;
 float confidence = 0.99;
 
-  // For visualization
+// For visualization
 
-  cv::Mat traj = cv::Mat::zeros(600, 600, CV_8UC3);
-  char text[100];
-  int fontFace = cv::FONT_HERSHEY_PLAIN;
-  double fontScale = 1;
-  int thickness = 1;
-  cv::Point textOrg(10, 50);
-  cv::Mat frameVis;
-  cv::Scalar red(0, 0, 255);
+cv::Mat traj = cv::Mat::zeros(600, 600, CV_8UC3);
+char text[100];
+int fontFace = cv::FONT_HERSHEY_PLAIN;
+double fontScale = 1;
+int thickness = 1;
+cv::Point textOrg(10, 50);
+cv::Mat frameVis;
+cv::Scalar red(0, 0, 255);
 
+ros::Publisher *imagePointsLastPubPointer;
+ros::Publisher *imagePointsCurPubPointer;
+ros::Publisher *localTransformPubPointer = NULL;
 
-void disparityHandler(const sensor_msgs::Image::ConstPtr& dispImage )
-{
-
-  cv_bridge::CvImageConstPtr imageDataCv = cv_bridge::toCvShare(dispImage, sensor_msgs::image_encodings::TYPE_16SC1);
-
-   double vis_mult = 1.0;
-   cv::Mat filtered_disp_vis;
-
-    //cv::ximgproc::getDisparityVis(left_disp, raw_disp_vis, vis_mult);
-    //cv::namedWindow("raw disparity", cv::WINDOW_AUTOSIZE);
-    //cv::imshow("raw disparity", raw_disp_vis);
-
-  
-
-   if(!imageDataCv->image.empty())
-   {
-      disparity = imageDataCv->image;
-
-      //std::cout << "imageDataCv->image.empty(): " << imageDataCv->image.empty() << "\n";
-      cv::ximgproc::getDisparityVis(imageDataCv->image, filtered_disp_vis, vis_mult);
-
-      cv::imshow("filtered disparity", filtered_disp_vis);
-      cv::waitKey(1);
-
-   }
-    
-}
-
-void curImageHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
-{
-
-  imagePointsCurTime = imagePoints2->header.stamp.toSec();
-
-  imagePointsCur->clear();
-  pcl::fromROSMsg(*imagePoints2, *imagePointsCur);
-
-}
-
-float findDepth ( const cv::Point2f& pt )
-{
-    int x = cvRound(pt.x);
-    int y = cvRound(pt.y);
-    ushort d = disparity.ptr<ushort>(y)[x];
-    if ( d!=0 )
-    {
-        return bf / (float(d)/16);
-    }
-    else 
-    {
-        // check the nearby points 
-        int dx[4] = {-1,0,1,0};
-        int dy[4] = {0,-1,0,1};
-        for ( int i=0; i<4; i++ )
-        {
-            d = disparity.ptr<ushort>( y+dy[i] )[x+dx[i]];
-            if ( d!=0 )
-            {
-                return bf / (float(d)/16);   // ?? base_line / d 
-            }
-        }
-    }
-    return -1.0;
-}
 
 void UpdatePoseMatrices()
 { 
@@ -242,6 +186,14 @@ void estimatePoseRANSAC( const std::vector<cv::Point3f> &list_points3d, // list 
   cv::Mat _t_matrix;
 
 
+  cv::Mat A_matrix = cv::Mat::zeros(3, 3, CV_64FC1);   // intrinsic camera parameters
+
+  A_matrix.at<double>(0, 0) = kImage[0];       //      [ fx   0  cx ]
+  A_matrix.at<double>(0, 2) = kImage[2];       //      [  0  fy  cy ]
+  A_matrix.at<double>(1, 1) = kImage[4];       //      [  0   0   1 ]
+  A_matrix.at<double>(1, 2) = kImage[5];
+  A_matrix.at<double>(2, 2) = 1;
+
   bool useExtrinsicGuess = false;   // if true the function uses the provided rvec and tvec values as
             // initial approximations of the rotation and translation vectors
 
@@ -252,93 +204,12 @@ void estimatePoseRANSAC( const std::vector<cv::Point3f> &list_points3d, // list 
   Rodrigues(rvec,_R_matrix);      // converts Rotation Vector to Matrix
   _t_matrix = tvec;       // set translation matrix
 
-  std::cout << "_t_matrix: " << _t_matrix << "\n";
+  //std::cout << "_t_matrix: " << _t_matrix << "\n";
   set_T_matrix(mTcw, _R_matrix, _t_matrix); // set rotation-translation matrix
 
-  std::cout << "mTcw: " << mTcw << "\n";
+  //std::cout << "mTcw: " << mTcw << "\n";
 }
 
-void imagePointsHandler(const sensor_msgs::PointCloud2ConstPtr& imagePoints2)
-{
-  imagePointsLastTime = imagePoints2->header.stamp.toSec();
-
-  pcl::PointCloud<ImagePoint>::Ptr imagePointsTemp = imagePointsLast;
-  imagePointsLast = imagePointsCur;
-  imagePointsCur = imagePointsTemp;
-
-  imagePointsLast->clear();
-  pcl::fromROSMsg(*imagePoints2, *imagePointsLast);
-
-     std::cout << "imagePointsLastOdom.size: " << imagePointsLast->size() << "\n";
-   //cout <<  "imagePointsCur.size: " << imagePointsCur->size() << "\n";
-
-  if(!disparity.empty())
-  {
-    for (int i = 0; i < imagePointsLast->size(); i++)
-    {
-      //cv::Mat point3dMat = UnprojectStereo(cv::Point2f(imagePointsLast->points[i].u, imagePointsLast->points[i].v));
-      cv::Mat point3dMat;
-      if (!point3dMat.empty())
-      {
-
-        mvP3Dw.push_back(cv::Point3f(point3dMat.at<float>(0), point3dMat.at<float>(1), point3dMat.at<float>(2)));
-        mvP2D.push_back(cv::Point2f(imagePointsCur->points[i].u, imagePointsCur->points[i].v));
-      }
-
-      //std::cout << "depth: " << depth << "\n";
-
-      //ImagePoint ip = imagePointsLast->points[i];
-    }
-
-      std::cout << "mvP3Dw: " << mvP3Dw.size() << "\n";
-      std::cout << "mvP2D: " << mvP2D.size() << "\n";
-
-      estimatePoseRANSAC(mvP3Dw, mvP2D, pnpMethod, inliersIdx,
-                      iterationsCount, reprojectionError, confidence, mTcw);
-
-      //std::cout << "mTcw: " << mTcw << "\n";
-  }
-
-
-/*
-
-
-*/
-
-  imagePointsLastNum = imagePointsCurNum;
-  imagePointsCurNum = imagePointsCur->points.size();
-
-  pcl::PointCloud<ImagePoint>::Ptr startPointsTemp = startPointsLast;
-  startPointsLast = startPointsCur;
-  startPointsCur = startPointsTemp;
-
-  pcl::PointCloud<pcl::PointXYZHSV>::Ptr startTransTemp = startTransLast;
-  startTransLast = startTransCur;
-  startTransCur = startTransTemp;
-
-  std::vector<float>* ipDepthTemp = ipDepthLast;
-  ipDepthLast = ipDepthCur;
-  ipDepthCur = ipDepthTemp;
-
-
-
-
-
-
-
-
-  sensor_msgs::PointCloud2 depthPoints2;
-  pcl::toROSMsg(*depthPointsSend, depthPoints2);
-  depthPoints2.header.frame_id = "camera2";
-  depthPoints2.header.stamp = ros::Time().fromSec(imagePointsLastTime);
-  depthPointsPubPointer->publish(depthPoints2);
-
-  sensor_msgs::PointCloud2 imagePointsProj2;
-  pcl::toROSMsg(*imagePointsProj, imagePointsProj2);
-  imagePointsProj2.header.frame_id = "camera2";
-  imagePointsProj2.header.stamp = ros::Time().fromSec(imagePointsLastTime);
-  imagePointsProjPubPointer->publish(imagePointsProj2);
-}
 
 void depthCloudHandler(const sensor_msgs::PointCloud2ConstPtr& depthCloud2)
 {
@@ -360,138 +231,18 @@ void depthCloudHandler(const sensor_msgs::PointCloud2ConstPtr& depthCloud2)
   }
 }
 
-void imuDataHandler(const sensor_msgs::Imu::ConstPtr& imuData)
-{
-  double roll, pitch, yaw;
-  tf::Quaternion orientation;
-  tf::quaternionMsgToTF(imuData->orientation, orientation);
-  tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
-
-  imuPointerLast = (imuPointerLast + 1) % imuQueLength;
-
-  imuTime[imuPointerLast] = imuData->header.stamp.toSec() - 0.1068;
-  imuRoll[imuPointerLast] = roll;
-  imuPitch[imuPointerLast] = pitch;
-  imuYaw[imuPointerLast] = yaw;
-}
-
-void imageDataHandler(const sensor_msgs::Image::ConstPtr& imageData) 
-{
-  cv_bridge::CvImagePtr bridge = cv_bridge::toCvCopy(imageData, "mono8");
-
-  int ipRelationsNum = ipRelations->points.size();
-  
-  for (int i = 0; i < ipRelationsNum; i++) {
-    if (fabs(ipRelations->points[i].v) < 0.5) {
-      cv::circle(bridge->image, cv::Point((kImage[2] - ipRelations->points[i].z * kImage[0]) / showDSRate,
-                (kImage[5] - ipRelations->points[i].h * kImage[4]) / showDSRate), 1, CV_RGB(255, 0, 0), 2);
-    } else if (fabs(ipRelations->points[i].v - 1) < 0.5) {
-      cv::circle(bridge->image, cv::Point((kImage[2] - ipRelations->points[i].z * kImage[0]) / showDSRate,
-                (kImage[5] - ipRelations->points[i].h * kImage[4]) / showDSRate), 1, CV_RGB(0, 255, 0), 2);
-    } else if (fabs(ipRelations->points[i].v - 2) < 0.5) {
-      cv::circle(bridge->image, cv::Point((kImage[2] - ipRelations->points[i].z * kImage[0]) / showDSRate,
-                (kImage[5] - ipRelations->points[i].h * kImage[4]) / showDSRate), 1, CV_RGB(0, 0, 255), 2);
-    } /*else {
-      cv::circle(bridge->image, cv::Point((kImage[2] - ipRelations->points[i].z * kImage[0]) / showDSRate,
-                (kImage[5] - ipRelations->points[i].h * kImage[4]) / showDSRate), 1, CV_RGB(0, 0, 0), 2);
-    }
-    */
-  }
-  
-  sensor_msgs::Image::Ptr imagePointer = bridge->toImageMsg();
-  imageShowPubPointer->publish(imagePointer);
-}
-
-cv::Mat toCvMat(const Eigen::Matrix<double,4,4> &m)
-{
-    cv::Mat cvMat(4,4,CV_32F);
-    for(int i=0;i<4;i++)
-        for(int j=0; j<4; j++)
-            cvMat.at<float>(i,j)=m(i,j);
-
-    return cvMat.clone();
-}
-
-void bundleAdjustment (
-    const std::vector< cv::Point3f > points_3d,
-    const std::vector< cv::Point2f > points_2d,
-    const cv::Mat& K, cv::Mat& R, cv::Mat& t )
-{
-    // 初始化g2o
-    typedef g2o::BlockSolver< g2o::BlockSolverTraits<6,3> > Block;  // pose 维度为 6, landmark 维度为 3
-    Block::LinearSolverType* linearSolver = new g2o::LinearSolverCSparse<Block::PoseMatrixType>(); // 线性方程求解器
-    Block* solver_ptr = new Block ( linearSolver );     // 矩阵块求解器
-    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg ( solver_ptr );
-    g2o::SparseOptimizer optimizer;
-    optimizer.setAlgorithm ( solver );
-
-    // vertex
-    g2o::VertexSE3Expmap* pose = new g2o::VertexSE3Expmap(); // camera pose
-    Eigen::Matrix3d R_mat;
-    R_mat <<
-          R.at<double> ( 0,0 ), R.at<double> ( 0,1 ), R.at<double> ( 0,2 ),
-               R.at<double> ( 1,0 ), R.at<double> ( 1,1 ), R.at<double> ( 1,2 ),
-               R.at<double> ( 2,0 ), R.at<double> ( 2,1 ), R.at<double> ( 2,2 );
-    pose->setId ( 0 );
-    pose->setEstimate ( g2o::SE3Quat (
-                            R_mat,
-                            Eigen::Vector3d ( t.at<double> ( 0,0 ), t.at<double> ( 1,0 ), t.at<double> ( 2,0 ) )
-                        ) );
-    optimizer.addVertex ( pose );
-
-    int index = 1;
-    for ( const cv::Point3f p:points_3d )   // landmarks
-    {
-        g2o::VertexSBAPointXYZ* point = new g2o::VertexSBAPointXYZ();
-        point->setId ( index++ );
-        point->setEstimate ( Eigen::Vector3d ( p.x, p.y, p.z ) );
-        point->setMarginalized ( true ); // g2o 中必须设置 marg 参见第十讲内容
-        optimizer.addVertex ( point );
-    }
-
-    // parameter: camera intrinsics
-    g2o::CameraParameters* camera = new g2o::CameraParameters (
-        K.at<double> ( 0,0 ), Eigen::Vector2d ( K.at<double> ( 0,2 ), K.at<double> ( 1,2 ) ), 0
-    );
-    camera->setId ( 0 );
-    optimizer.addParameter ( camera );
-
-    // edges
-    index = 1;
-    for ( const cv::Point2f p:points_2d )
-    {
-        g2o::EdgeProjectXYZ2UV* edge = new g2o::EdgeProjectXYZ2UV();
-        edge->setId ( index );
-        edge->setVertex ( 0, dynamic_cast<g2o::VertexSBAPointXYZ*> ( optimizer.vertex ( index ) ) );
-        edge->setVertex ( 1, pose );
-        edge->setMeasurement ( Eigen::Vector2d ( p.x, p.y ) );
-        edge->setParameterId ( 0,0 );
-        edge->setInformation ( Eigen::Matrix2d::Identity() );
-        optimizer.addEdge ( edge );
-        index++;
-    }
-
-    optimizer.setVerbose ( false );
-    optimizer.initializeOptimization();
-    optimizer.optimize ( 100 );
-
-    std::cout<< "after optimization: "<< std::endl;
-    std::cout<<"T= "<<Eigen::Isometry3d ( pose->estimate() ).matrix() << std::endl;
-    cv::Mat T = toCvMat(Eigen::Isometry3d ( pose->estimate() ).matrix());
-
-    T(cv::Range(0, 3), cv::Range(0, 3)).copyTo(R);
-    T(cv::Range(0, 3), cv::Range(3, 4)).copyTo(t);
-
-          //R_local.copyTo(T(cv::Range(0, 3), cv::Range(0, 3)));
-      //t_local.copyTo(T(cv::Range(0, 3), cv::Range(3, 4)));
-}
-
 void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast,
                         const sensor_msgs::PointCloud2ConstPtr& pointCloudCur)
 {
 
+  timeLast = timeCur;
+  timeCur = depthCloudLast->header.stamp.toSec() - 0.1163;
+
   pcl::PointCloud<ImagePoint>::Ptr imagePointsCur(new pcl::PointCloud<ImagePoint>());
   pcl::PointCloud<DepthPoint>::Ptr imagePointsLast(new pcl::PointCloud<DepthPoint>());
+  pcl::PointCloud<ImagePoint>::Ptr imagePointsCurBA(new pcl::PointCloud<ImagePoint>());
+  pcl::PointCloud<DepthPoint>::Ptr depthPointsLastBA(new pcl::PointCloud<DepthPoint>());
+  ktl_vo::transform_msg localTransform;
   std::vector<cv::Point3f> mvP3Dw;
   std::vector<cv::Point2f> mvP2D;
   cv::Mat mTcw_local = cv::Mat::eye(4,4,CV_32F);
@@ -504,26 +255,29 @@ void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast,
   //std::cout << "imagePointsLast.size: " << imagePointsLast->size() << "\n";
   //std::cout << "imagePointsCur.size: " << imagePointsCur->size() << "\n";
 
+  ImagePoint point;
+  DepthPoint depth_point;
   for (int i = 0; i < imagePointsLast->size(); i++)
-    {
+  {
       
       cv::Mat point3D = UnprojectStereo(cv::Point3f(imagePointsLast->points[i].u,
                                                    imagePointsLast->points[i].v,
                                                    imagePointsLast->points[i].depth));
 
       mvP3Dw.push_back(cv::Point3f(point3D.at<float>(0), point3D.at<float>(1), point3D.at<float>(2)));
+      depth_point.u = point3D.at<float>(0);
+      depth_point.v = point3D.at<float>(1);
+      depth_point.depth = point3D.at<float>(2);
+      depthPointsLastBA->push_back(depth_point);
 
       mvP2D.push_back(cv::Point2f(imagePointsCur->points[i].u, imagePointsCur->points[i].v));
-      
-      //std::cout << "depth: " << depth << "\n";
+      imagePointsCurBA->push_back(imagePointsCur->points[i]);
+  }
 
-      //ImagePoint ip = imagePointsLast->points[i];
-    }
+  std::cout << "mvP3Dw: " << mvP3Dw.size() << "\n";
+  std::cout << "mvP2D: " << mvP2D.size() << "\n";
 
-      std::cout << "mvP3Dw: " << mvP3Dw.size() << "\n";
-      std::cout << "mvP2D: " << mvP2D.size() << "\n";
-
-      estimatePoseRANSAC(mvP3Dw, mvP2D, pnpMethod, inliersIdx,
+  estimatePoseRANSAC(mvP3Dw, mvP2D, pnpMethod, inliersIdx,
                       iterationsCount, reprojectionError, confidence, mTcw_local);
 
       std::vector<cv::Point2f> points2DInliers;
@@ -537,24 +291,42 @@ void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast,
       cv::Mat R_local = mTcw_local.rowRange(0,3).colRange(0,3);
       cv::Mat t_local = mTcw_local.rowRange(0,3).col(3);
 
-      std::cout << "mTcw_local: " << mTcw_local << "\n";
+      //std::cout << "mTcw_local: " << mTcw_local << "\n";
 
-      bundleAdjustment ( mvP3Dw, mvP2D, kMat, R_local, t_local);
+      for(int i=0;i<4;i++)
+      {
+        for(int j=0; j<4; j++)
+        {
+          localTransform.transform[i*4+j] = mTcw_local.at<float>(i, j);
+        }
+      }
 
-      std::cout << "points2DInliers: " << points2DInliers.size() << "\n";
+      //std::cout << "points2DInliers: " << points2DInliers.size() << "\n";
 
       mTcw = mTcw * mTcw_local;
 
-      
-      //std::cout << "mTcw: " << mTcw << "\n";
-      //UpdatePoseMatrices();
 
+  localTransform.header.stamp = ros::Time().fromSec(timeLast);
+  voDataPubPointer->publish(localTransform);
+
+  sensor_msgs::PointCloud2 imagePointsLast2;
+  pcl::toROSMsg(*depthPointsLastBA, imagePointsLast2);
+  imagePointsLast2.header.stamp = ros::Time().fromSec(timeLast);
+  imagePointsLastPubPointer->publish(imagePointsLast2);
+
+  sensor_msgs::PointCloud2 imagePointsCur2;
+  pcl::toROSMsg(*imagePointsCurBA, imagePointsCur2);
+  imagePointsCur2.header.stamp = ros::Time().fromSec(timeLast);
+  imagePointsCurPubPointer->publish(imagePointsCur2);
+    
+  //std::cout << "mTcw: " << mTcw << "\n";
+  //UpdatePoseMatrices();
 
   float x = mTcw.at<float>(0, 3) + 300.0;
   float y = mTcw.at<float>(2, 3) + 300.0;
   cv::circle(traj, cv::Point(x, y), 1, CV_RGB(255, 0, 0), 2);
   cv::rectangle(traj, cv::Point(10, 30), cv::Point(550, 50), CV_RGB(0, 0, 0), CV_FILLED);
-  std::cout << "x, y: " << x << " " << y << "\n";
+  //std::cout << "x, y: " << x << " " << y << "\n";
   sprintf(text, "Coordinates: x=%02fm, y=%02fm, z=%02fm", mTcw.at<float>(0, 3), mTcw.at<float>(1, 3), mTcw.at<float>(2, 3));
   cv::putText(traj, text, textOrg, fontFace, fontScale, cv::Scalar::all(255), thickness, 8);
   
@@ -568,12 +340,6 @@ int main(int argc, char** argv)
   ros::init(argc, argv, "visualOdometry");
   ros::NodeHandle nh;
 
-  A_matrix.at<double>(0, 0) = kImage[0];       //      [ fx   0  cx ]
-  A_matrix.at<double>(0, 2) = kImage[2];       //      [  0  fy  cy ]
-  A_matrix.at<double>(1, 1) = kImage[4];       //      [  0   0   1 ]
-  A_matrix.at<double>(1, 2) = kImage[5];
-  A_matrix.at<double>(2, 2) = 1;
-
 
   //ros::Subscriber imagePointsSub = nh.subscribe<sensor_msgs::PointCloud2>
   //                                 ("/image_points_last", 5, imagePointsHandler);
@@ -581,9 +347,6 @@ int main(int argc, char** argv)
   //ros::Subscriber depthCloudSub = nh.subscribe<sensor_msgs::PointCloud2> 
   //                                ("/kitti/velo/pointcloud", 5, depthCloudHandler);
 
-  ros::Subscriber imuDataSub = nh.subscribe<sensor_msgs::Imu> ("/kitti/oxts/imu", 5, imuDataHandler);
-
-  ros::Subscriber dispSub = nh.subscribe<sensor_msgs::Image> ("/image/depth", 5, disparityHandler);
 
   std::shared_ptr<message_filters::Subscriber<sensor_msgs::PointCloud2>> last_img_sub = 
       std::shared_ptr<message_filters::Subscriber<sensor_msgs::PointCloud2>>(
@@ -599,10 +362,19 @@ int main(int argc, char** argv)
 
   sync_->registerCallback(boost::bind(pointCloudCallback, _1, _2));
 
+  ros::Publisher imagePointsLastPub = nh.advertise<sensor_msgs::PointCloud2> ("/depth_points_last_ba", 5);
+  imagePointsLastPubPointer = &imagePointsLastPub;
+
+  ros::Publisher imagePointsCurPub = nh.advertise<sensor_msgs::PointCloud2> ("/image_points_cur_ba", 5);
+  imagePointsCurPubPointer = &imagePointsCurPub;
+
   cv::namedWindow("Trajectory", cv::WINDOW_AUTOSIZE);
 
-  ros::Publisher voDataPub = nh.advertise<nav_msgs::Odometry> ("/cam_to_init", 5);
+  ros::Publisher voDataPub = nh.advertise<ktl_vo::transform_msg> ("/local_transform", 5);
   voDataPubPointer = &voDataPub;
+  
+  //ros::Publisher localTransformPub = nh.advertise<std_msgs::Float32MultiArray>("/local_transform", 5);
+  //localTransformPubPointer = &localTransformPub;
 
   tf::TransformBroadcaster tfBroadcaster;
   tfBroadcasterPointer = &tfBroadcaster;
@@ -613,7 +385,6 @@ int main(int argc, char** argv)
   ros::Publisher imagePointsProjPub = nh.advertise<sensor_msgs::PointCloud2> ("/image_points_proj", 1);
   imagePointsProjPubPointer = &imagePointsProjPub;
 
-  ros::Subscriber imageDataSub = nh.subscribe<sensor_msgs::Image>("/image/show", 1, imageDataHandler);
 
   ros::Publisher imageShowPub = nh.advertise<sensor_msgs::Image>("/image/show_2", 1);
   imageShowPubPointer = &imageShowPub;

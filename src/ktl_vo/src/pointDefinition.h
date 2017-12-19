@@ -11,6 +11,9 @@
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/kdtree/kdtree_flann.h>
+#include <opencv2/core/core.hpp>
+#include <vector>
+#include <map>
 
 struct ImagePoint {
      float u, v;
@@ -27,6 +30,7 @@ struct DepthPoint {
      float depth;
      int label;
      int ind;
+     int  newKeyFrame;
 };
 
 POINT_CLOUD_REGISTER_POINT_STRUCT (DepthPoint,
@@ -34,6 +38,21 @@ POINT_CLOUD_REGISTER_POINT_STRUCT (DepthPoint,
                                    (float, v, v)
                                    (float, depth, depth)
                                    (int, label, label)
-                                   (int, ind, ind))
+                                   (int, ind, ind)
+                                   (int, newKeyFrame, newKeyFrame))
+
+struct Pose
+{
+     cv::Mat mTcw;
+     std::map<int, cv::Point2f> imagePoints;   //index of a point in world frame, coordinates in current frame
+};
+
+struct MapPoint
+{
+     cv::Point3f Pwd;
+     int ind;
+     std::vector<int> observedPoses; 
+};
+
 
 #endif

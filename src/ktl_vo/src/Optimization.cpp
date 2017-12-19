@@ -51,6 +51,8 @@ cv::Mat toCvMat(const Eigen::Matrix<double,4,4> &m)
     return cvMat.clone();
 }
 
+bool newKeyFrame = true;
+
 void bundleAdjustment (
     const std::vector< cv::Point3f > points_3d,
     const std::vector< cv::Point2f > points_2d,
@@ -257,6 +259,8 @@ void poseOptimization(const std::vector< cv::Point3f > points_3d,
     
 }
 
+std::vector<MapPoint> localMap;
+std::vector<Pose> localPoses;
 
 void optimizationCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast,
                           const sensor_msgs::PointCloud2ConstPtr& pointCloudCur,
@@ -284,6 +288,52 @@ void optimizationCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast
 
   	pcl::fromROSMsg(*depthCloudLast, *depthPointsLastBA);
   	pcl::fromROSMsg(*pointCloudCur, *imagePointsCurBA);
+
+  	if(newKeyFrame)
+  	{
+  		Pose newPose;
+  		newPose.mTcw = mTcw_local;
+        localPoses.push_back(newPose);
+
+  		localMap.reserve(depthPointsLastBA->size());
+
+  		for(int i = 0; i < depthPointsLastBA->size(); i++)
+  		{
+  			cv::Point3f worldPoint = cv::Point3f(depthPointsLastBA->points[i].u,
+                                         depthPointsLastBA->points[i].v,
+                                         depthPointsLastBA->points[i].depth);
+  			MapPoint newMapPoint;
+  			newMapPoint.Pwd = worldPoint;
+  			newMapPoint.ind = depthPointsLastBA->points[i].ind;
+  			localMap[depthPointsLastBA->points[i].ind] = newMapPoint;
+  		}
+
+  		for(int i = 0; i < imagePointsCurBA->size(); i++)
+  		{
+  			newPose.imagePoints[imagePointsCurBA->points[i].ind] = cv::Point2f(imagePointsCurBA->points[i].u,
+  																		       imagePointsCurBA->points[i].v);
+
+  			localMap[imagePointsCurBA->points[i].ind].observedPoses.push_back(0);	
+  		}
+
+  	}
+  	else
+  	{
+  		Pose newPose;
+  		auto lastPose = localPoses.back(); 
+  		newPose.mTcw = lastPose.mTcw *  mTcw_local;
+        localPoses.push_back(newPose);
+
+        for(int i = 0; i < imagePointsCurBA->size(); i++)
+  		{
+  			newPose.imagePoints[imagePointsCurBA->points[i].ind] = cv::Point2f(imagePointsCurBA->points[i].u,
+  																		       imagePointsCurBA->points[i].v);
+
+  			localMap[imagePointsCurBA->points[i].ind].observedPoses.push_back(localPoses.size()-1);	
+  		}
+
+  	}
+
     
     for (int i = 0; i < depthPointsLastBA->size(); i++)
   	{
@@ -295,13 +345,13 @@ void optimizationCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast
       mvP2D.push_back(cv::Point2f(imagePointsCurBA->points[i].u, imagePointsCurBA->points[i].v));
   	}
 
-      //std::cout << "mTcw_local optimization: " << mTcw_local << "\n";
+      std::cout << "mTcw_local optimization: " << mTcw_local << "\n";
 
       //bundleAdjustment ( mvP3Dw, mvP2D, kMat, R_local, t_local);
 
       poseOptimization( mvP3Dw, mvP2D, kMat, R_local, t_local);
 
-      //std::cout << "mTcw_local after optimization: " << mTcw_local << "\n";
+      std::cout << "mTcw_local after optimization: " << mTcw_local << "\n";
       
       if(mTcw.empty())
       	mTcw = cv::Mat::eye(4,4,CV_32F);

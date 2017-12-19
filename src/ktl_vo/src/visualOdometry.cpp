@@ -111,6 +111,7 @@ std::vector<cv::Point2f> mvP2D;
 cv::Mat kMat = cv::Mat(3, 3, CV_64FC1, kImage);
 // Camera pose.
 cv::Mat mTcw = cv::Mat::eye(4,4,CV_32F);
+cv::Mat mTcw_local;
 
 // Rotation, translation and camera center
 cv::Mat mRcw = mTcw.rowRange(0,3).colRange(0,3);;
@@ -181,9 +182,14 @@ void estimatePoseRANSAC( const std::vector<cv::Point3f> &list_points3d, // list 
 {
   cv::Mat distCoeffs = cv::Mat::zeros(4, 1, CV_64FC1);  // vector of distortion coefficients
   cv::Mat rvec = cv::Mat::zeros(3, 1, CV_64FC1);          // output rotation vector
-  cv::Mat tvec = cv::Mat::zeros(3, 1, CV_64FC1);    // output translation vector
+  Rodrigues(mTcw.rowRange(0,3).colRange(0,3), rvec);
+  cv::Mat tvec = mTcw.rowRange(0,3).col(3);
+      // output translation vector
   cv::Mat _R_matrix;
   cv::Mat _t_matrix;
+
+  std::cout << "rvec: " << rvec << "\n";
+  std::cout << "tvec: " << tvec << "\n";
 
 
   cv::Mat A_matrix = cv::Mat::zeros(3, 3, CV_64FC1);   // intrinsic camera parameters
@@ -245,7 +251,7 @@ void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast,
   ktl_vo::transform_msg localTransform;
   std::vector<cv::Point3f> mvP3Dw;
   std::vector<cv::Point2f> mvP2D;
-  cv::Mat mTcw_local = cv::Mat::eye(4,4,CV_32F);
+  //cv::Mat mTcw_local = cv::Mat::eye(4,4,CV_32F);
 
   imagePointsLastTime = depthCloudLast->header.stamp.toSec();
 
@@ -280,14 +286,28 @@ void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast,
   estimatePoseRANSAC(mvP3Dw, mvP2D, pnpMethod, inliersIdx,
                       iterationsCount, reprojectionError, confidence, mTcw_local);
 
+/*
       std::vector<cv::Point2f> points2DInliers;
+      std::vector<cv::Point3f> points3DInliers;
       for(int inliersIndex = 0; inliersIndex < inliersIdx.rows; inliersIndex++)
       {
         int n = inliersIdx.at<int>(inliersIndex);
+
         cv::Point2f point2D = mvP2D[n];
         points2DInliers.push_back(point2D);
-      }
+        point.u = point2D.x;
+        point.v = point2D.y;
+        imagePointsCurBA->push_back(point);
 
+        cv::Point3f point3D = mvP3Dw[n];
+        points3DInliers.push_back(point3D);
+        depth_point.u = point3D.x;
+        depth_point.v = point3D.y;
+        depth_point.depth = point3D.z;
+        depthPointsLastBA->push_back(depth_point);
+
+      }
+*/
       cv::Mat R_local = mTcw_local.rowRange(0,3).colRange(0,3);
       cv::Mat t_local = mTcw_local.rowRange(0,3).col(3);
 
@@ -340,6 +360,7 @@ int main(int argc, char** argv)
   ros::init(argc, argv, "visualOdometry");
   ros::NodeHandle nh;
 
+  mTcw_local = cv::Mat::eye(4,4,CV_32F);
 
   //ros::Subscriber imagePointsSub = nh.subscribe<sensor_msgs::PointCloud2>
   //                                 ("/image_points_last", 5, imagePointsHandler);

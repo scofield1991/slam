@@ -274,7 +274,7 @@ void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& depthCloudLast,
       depth_point.u = point3D.at<float>(0);
       depth_point.v = point3D.at<float>(1);
       depth_point.depth = point3D.at<float>(2);
-      depthPointsLastBA->push_back(depth_point);
+      depthPointsLastBA->push_back(imagePointsLast->points[i]);
 
       mvP2D.push_back(cv::Point2f(imagePointsCur->points[i].u, imagePointsCur->points[i].v));
       imagePointsCurBA->push_back(imagePointsCur->points[i]);

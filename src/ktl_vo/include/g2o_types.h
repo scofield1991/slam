@@ -88,3 +88,42 @@ public:
   Vector3d Xw;
   double fx, fy, cx, cy;
 };
+
+class  EdgeSE3ProjectXYZ: public  BaseBinaryEdge<2, Vector2d, VertexSBAPointXYZ, VertexSE3Expmap>{
+public:
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+  EdgeSE3ProjectXYZ(){};
+
+  bool read(std::istream& is);
+
+  bool write(std::ostream& os) const;
+
+  void computeError()  {
+    const VertexSE3Expmap* v1 = static_cast<const VertexSE3Expmap*>(_vertices[1]);
+    const VertexSBAPointXYZ* v2 = static_cast<const VertexSBAPointXYZ*>(_vertices[0]);
+    Vector2d obs(_measurement);
+    double weight = 1.0;
+    weight = 1.0 / (fabs(obs(0) - cx) / fabs(cx) + 0.05);
+    //std::cout << "weight: " << weight << "\n";
+
+    //_error = (obs-cam_project(v1->estimate().map(v2->estimate())));
+    //std::cout << "Error before weightening: \n" << _error << "\n";
+
+    _error = weight * (obs-cam_project(v1->estimate().map(v2->estimate())));
+    //std::cout << "Error after weightening: \n" << _error << "\n";
+  }
+
+  bool isDepthPositive() {
+    const VertexSE3Expmap* v1 = static_cast<const VertexSE3Expmap*>(_vertices[1]);
+    const VertexSBAPointXYZ* v2 = static_cast<const VertexSBAPointXYZ*>(_vertices[0]);
+    return (v1->estimate().map(v2->estimate()))(2)>0.0;
+  }
+    
+
+  virtual void linearizeOplus();
+
+  Vector2d cam_project(const Vector3d & trans_xyz) const;
+
+  double fx, fy, cx, cy;
+};

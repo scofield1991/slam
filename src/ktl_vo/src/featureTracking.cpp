@@ -531,7 +531,7 @@ std::cout << "selectedIndeces: " << selectedIndeces.size() << "\n";
   	float disparity = (featuresLastLeftSelect[i].x - featuresLastRightSelect[i].x);
     //float disparity = findDepth(cv::Point2f(featuresLastLeftSelect[i].x, featuresLastLeftSelect[i].y), depthMap);
     float depth  = bf / disparity;
-    float mThDepth = bf * 100.0f / kImage[0];
+    float mThDepth = bf * 70.0f / kImage[0];
   	if(depth > 0 && depth < mThDepth)
   	{
         int ind = i;
@@ -542,6 +542,7 @@ std::cout << "selectedIndeces: " << selectedIndeces.size() << "\n";
         depth_point.v = featuresLastLeftSelect[i].y;
         depth_point.depth = bf / disparity;
         depth_point.ind = ind;
+        depth_point.newKeyFrame = int(newKeyFrame);
         imagePointsLast->push_back(depth_point);
 
         if (newKeyFrame)
